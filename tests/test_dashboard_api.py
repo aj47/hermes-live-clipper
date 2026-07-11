@@ -83,6 +83,11 @@ def test_publisher_handoff_preserves_render_and_tracks_queue(monkeypatch, servic
     outbox = Path(handoff["outbox_path"])
     assert outbox.read_bytes() == b"fake-mp4"
     assert outbox.parent.joinpath("handoff.json").exists()
+    progress_path = outbox.parent / "publisher-progress.json"
+    assert progress_path.exists()
+    progress = service._read_publisher_progress(progress_path)
+    assert progress["phase"] == "asset_prepared"
+    assert progress["percent"] == 5
     task = handoff["task"]
     assert task["assignee"] == "default"
     assert task["idempotency_key"] == "live-clipper-publisher:render-publisher"
@@ -90,6 +95,8 @@ def test_publisher_handoff_preserves_render_and_tracks_queue(monkeypatch, servic
     assert str(outbox) in task["body"]
     assert "signed-in local TikTok and YouTube accounts" in task["body"]
     assert "Set status=published only when both" in task["body"]
+    assert str(progress_path) in task["body"]
+    assert "youtube_uploading" in task["body"]
 
     completed = client.post(
         "/renders/render-publisher/publisher-handoff/complete",
@@ -99,6 +106,8 @@ def test_publisher_handoff_preserves_render_and_tracks_queue(monkeypatch, servic
     detail = client.get(f"/jobs/{job['id']}").json()
     assert detail["renders"][0]["publisher_status"] == "queued"
     assert detail["renders"][0]["publisher_task_id"] == "hermes-task-123"
+    assert detail["renders"][0]["publisher_progress"]["phase"] == "queued"
+    assert detail["renders"][0]["publisher_progress"]["percent"] == 10
     publisher_actions = {
         entry["action"] for entry in detail["activity"] if entry["role"] == "publisher_growth"
     }
@@ -112,8 +121,8 @@ def test_publisher_handoff_preserves_render_and_tracks_queue(monkeypatch, servic
 
     outbox.parent.joinpath("publisher-result.json").write_text(
         '{"status":"published","summary":"Both verified","platforms":['
-        '{"platform":"youtube","status":"published","receipt":"yt-123"},'
-        '{"platform":"tiktok","status":"published","receipt":"tt-123"}]}'
+        '{"platform":"youtube","status":"published","receipt":"yt-123","url":"https://youtube.com/watch?v=yt-123"},'
+        '{"platform":"tiktok","status":"published","receipt":"tt-123","url":"https://tiktok.com/@techfren/video/tt-123"}]}'
     )
     detail = client.get(f"/jobs/{job['id']}").json()
     assert detail["renders"][0]["publisher_result"]["status"] == "published"

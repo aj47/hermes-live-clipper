@@ -9,7 +9,7 @@
   const h = React.createElement;
   const { useEffect } = SDK.hooks;
   const api = "/api/plugins/hermes-live-clipper";
-const state = { selected: null, detail: null, activeTab: "analyst", preview: null, lastStatus: null, notice: "", publisherTasks: {}, activityCandidate: null, selectedJobs: new Set(), selectedCandidates: new Set(), selectedRenders: new Set(), cleanupPlan: null };
+const state = { selected: null, detail: null, activeTab: "analyst", preview: null, lastStatus: null, notice: "", publisherTasks: {}, activityCandidate: null, activityRender: null, selectedJobs: new Set(), selectedCandidates: new Set(), selectedRenders: new Set(), cleanupPlan: null };
 const publisherBoard = "live-clipper-publishing";
 
 const el = (tag, props = {}, children = []) => {
@@ -31,12 +31,36 @@ async function kanbanRequest(path, options = {}) {
   return response.status === 204 ? null : response.json();
 }
 
+async function dashboardRequest(path, options = {}) {
+  const response = await authedFetch(`/api${path}`, {headers:{"Content-Type":"application/json"}, ...options});
+  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `Hermes dashboard request failed (${response.status})`);
+  return response.status === 204 ? null : response.json();
+}
+
+function workerSessionId(logContent, task) {
+  if (task?.session_id) return task.session_id;
+  return String(logContent || "").match(/^session_id:\s*([A-Za-z0-9_.:-]+)\s*$/m)?.[1] || null;
+}
+
 async function loadPublisherTasks(renders = []) {
   const tracked = renders.filter(item => item.publisher_task_id);
   await Promise.all(tracked.map(async item => {
     try {
-      const result = await kanbanRequest(`/tasks/${encodeURIComponent(item.publisher_task_id)}?board=${encodeURIComponent(publisherBoard)}`);
-      state.publisherTasks[item.id] = result.task || result;
+      const detail = await kanbanRequest(`/tasks/${encodeURIComponent(item.publisher_task_id)}?board=${encodeURIComponent(publisherBoard)}`);
+      const task = detail.task || detail;
+      const telemetry = {...task, detail};
+      const active = ["running","blocked","review","done"].includes(task.status);
+      if (state.activityRender === item.id || active) {
+        telemetry.workerLog = await kanbanRequest(`/tasks/${encodeURIComponent(item.publisher_task_id)}/log?tail=100000&board=${encodeURIComponent(publisherBoard)}`).catch(error=>({exists:false,content:"",error:error.message}));
+        const runId = task.current_run_id || detail.runs?.[0]?.id || null;
+        if (runId != null) {
+          telemetry.run = await kanbanRequest(`/runs/${encodeURIComponent(runId)}?board=${encodeURIComponent(publisherBoard)}`).then(result=>result.run||result).catch(error=>({id:runId,error:error.message}));
+          telemetry.inspect = await kanbanRequest(`/runs/${encodeURIComponent(runId)}/inspect?board=${encodeURIComponent(publisherBoard)}`).catch(error=>({run_id:runId,alive:false,error:error.message}));
+        }
+        telemetry.sessionId = workerSessionId(telemetry.workerLog?.content,task);
+        if (telemetry.sessionId) telemetry.sessionMessages = await dashboardRequest(`/sessions/${encodeURIComponent(telemetry.sessionId)}/messages?limit=500`).catch(error=>({messages:[],error:error.message}));
+      }
+      state.publisherTasks[item.id] = telemetry;
     } catch (error) {
       state.publisherTasks[item.id] = {status:"unavailable", error:error.message};
     }
@@ -58,9 +82,22 @@ function formatDuration(seconds) {
 
 function formatActivityTime(value) {
   if (!value) return "just now";
-  const normalized = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
+  const normalized = typeof value === "number" ? value * 1000 : value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
   const date = new Date(normalized);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
+}
+
+function redactLog(value, limit = 6000) {
+  let text = typeof value === "string" ? value : JSON.stringify(value ?? "", null, 2);
+  text = text
+    .replace(/(authorization|bearer|cookie|password|secret|access[_-]?token|refresh[_-]?token|api[_-]?key)(\s*[=:]\s*|\s+)[^\s,"']+/gi,"$1$2[REDACTED]")
+    .replace(/([?&](?:token|key|signature|sig|auth)=)[^&\s]+/gi,"$1[REDACTED]");
+  return text.length > limit ? `…${text.slice(-limit)}` : text;
+}
+
+function verifiedLink(value) {
+  try { const url = new URL(value); return ["http:","https:"].includes(url.protocol) ? url.href : null; }
+  catch { return null; }
 }
 
 function oneSentence(value, fallback) {
@@ -121,6 +158,7 @@ async function executeCleanup() {
   if (state.preview?.url) URL.revokeObjectURL(state.preview.url);
   state.preview = null;
   state.activityCandidate = null;
+  state.activityRender = null;
   clearSelection();
   if (deletedSelectedJob) { state.selected = null; state.detail = null; }
   showNotice(`Deleted ${total} database records and reclaimed ${formatBytes(result.reclaimable_bytes)}.`);
@@ -200,7 +238,7 @@ function jobList(jobs) {
   const terminal = new Set(["stopped","completed","failed","needs_attention"]);
   const selectable = jobs.filter(job=>terminal.has(job.state));
   const allSelected = selectable.length>0 && selectable.every(job=>state.selectedJobs.has(job.id));
-  return el("aside", {class:"jobs"}, [el("div", {class:"section-title"}, [el("h2", {}, "Streams"),el("button",{class:"select-all",...(selectable.length?{}:{disabled:"true"}),onclick:()=>{selectable.forEach(job=>allSelected?state.selectedJobs.delete(job.id):state.selectedJobs.add(job.id));state.cleanupPlan=null;render(state.lastStatus);}},allSelected?"Clear":"Select stopped"),el("span", {}, `${jobs.length}`)]), ...jobs.map(job => el("div",{class:`job-row ${job.id===state.selected?"selected":""}`},[selectionCheckbox("job",job.id,`Select stream ${job.title||job.external_id||job.id}`,!terminal.has(job.state)),el("button", {class:"job", onclick:()=>{state.selected=job.id;state.activityCandidate=null;refresh();}}, [el("strong", {}, job.title || job.external_id || "Resolving stream"), el("small", {}, job.provider || "source"), el("span", {class:`badge ${job.state}`}, job.state.replaceAll("_"," "))])]))]);
+  return el("aside", {class:"jobs"}, [el("div", {class:"section-title"}, [el("h2", {}, "Streams"),el("button",{class:"select-all",...(selectable.length?{}:{disabled:"true"}),onclick:()=>{selectable.forEach(job=>allSelected?state.selectedJobs.delete(job.id):state.selectedJobs.add(job.id));state.cleanupPlan=null;render(state.lastStatus);}},allSelected?"Clear":"Select stopped"),el("span", {}, `${jobs.length}`)]), ...jobs.map(job => el("div",{class:`job-row ${job.id===state.selected?"selected":""}`},[selectionCheckbox("job",job.id,`Select stream ${job.title||job.external_id||job.id}`,!terminal.has(job.state)),el("button", {class:"job", onclick:()=>{state.selected=job.id;state.activityCandidate=null;state.activityRender=null;refresh();}}, [el("strong", {}, job.title || job.external_id || "Resolving stream"), el("small", {}, job.provider || "source"), el("span", {class:`badge ${job.state}`}, job.state.replaceAll("_"," "))])]))]);
 }
 
 function detailPanel() {
@@ -226,8 +264,8 @@ function pipelineRail(candidates, renders, words) {
     {id:"publisher",number:"03",role:"Publisher & Growth",verb:"Ships the story",metric:published?`${published} published`:`${handedOff} handed off`,copy:"Packages, publishes, and verifies receipts."},
   ];
   return el("div",{class:"pipeline-shell"},[
-    el("nav",{class:"pipeline-rail","aria-label":"Clip production agents"},stages.map((stage,index)=>el("button",{class:`agent-stage ${state.activeTab===stage.id?"active":""}`,onclick:()=>{state.activeTab=stage.id;state.activityCandidate=null;render(state.lastStatus);}},[el("span",{class:"stage-number"},stage.number),el("div",{},[el("span",{class:"stage-verb"},stage.verb),el("strong",{},stage.role),el("p",{},stage.copy)]),el("span",{class:"stage-metric"},stage.metric),index<stages.length-1?el("span",{class:"stage-arrow","aria-hidden":"true"},"→"):""]))),
-    el("button",{class:`transcript-switch ${state.activeTab==="transcript"?"active":""}`,onclick:()=>{state.activeTab="transcript";state.activityCandidate=null;render(state.lastStatus);}},["Transcript",el("span",{},words.length)]),
+    el("nav",{class:"pipeline-rail","aria-label":"Clip production agents"},stages.map((stage,index)=>el("button",{class:`agent-stage ${state.activeTab===stage.id?"active":""}`,onclick:()=>{state.activeTab=stage.id;state.activityCandidate=null;state.activityRender=null;render(state.lastStatus);}},[el("span",{class:"stage-number"},stage.number),el("div",{},[el("span",{class:"stage-verb"},stage.verb),el("strong",{},stage.role),el("p",{},stage.copy)]),el("span",{class:"stage-metric"},stage.metric),index<stages.length-1?el("span",{class:"stage-arrow","aria-hidden":"true"},"→"):""]))),
+    el("button",{class:`transcript-switch ${state.activeTab==="transcript"?"active":""}`,onclick:()=>{state.activeTab="transcript";state.activityCandidate=null;state.activityRender=null;render(state.lastStatus);}},["Transcript",el("span",{},words.length)]),
   ]);
 }
 
@@ -236,8 +274,9 @@ function activityPanel() {
   const candidate = state.detail.candidates.find(item => item.id === state.activityCandidate);
   if (!candidate) return "";
   const entries = (state.detail.activity || []).filter(item => item.candidate_id === candidate.id);
-  const relevantRenders = (state.detail.renders || []).filter(item => item.candidate_id === candidate.id && item.publisher_task_id);
-  const liveTask = relevantRenders.map(item => state.publisherTasks[item.id]).find(Boolean);
+  const relevantRenders = (state.detail.renders || []).filter(item => item.candidate_id === candidate.id && (item.publisher_task_id || item.publisher_progress || item.publisher_result));
+  const observedRender = state.activityRender ? relevantRenders.find(item=>item.id===state.activityRender) : relevantRenders[0];
+  const liveTask = observedRender ? state.publisherTasks[observedRender.id] : null;
   const roles = {
     story_analyst:{initials:"SA",label:"Story Analyst"},
     video_editor:{initials:"VE",label:"Video Editor"},
@@ -246,9 +285,40 @@ function activityPanel() {
     system:{initials:"SY",label:"System"},
   };
   return el("section",{class:"activity-panel"},[
-    el("div",{class:"activity-head"},[el("div",{},[el("p",{class:"eyebrow"},"CLIP ACTIVITY"),el("h3",{},candidate.title),el("p",{class:"muted"},`${entries.length} recorded actions across the production pipeline.`)]),el("button",{class:"ghost",onclick:()=>{state.activityCandidate=null;render(state.lastStatus);},"aria-label":"Close clip activity"},"Close")]),
+    el("div",{class:"activity-head"},[el("div",{},[el("p",{class:"eyebrow"},observedRender?"PUBLISHER CONSOLE":"CLIP ACTIVITY"),el("h3",{},candidate.title),el("p",{class:"muted"},observedRender?"Live Hermes execution, platform progress, receipts, and low-level logs.":`${entries.length} recorded actions across the production pipeline.`)]),el("button",{class:"ghost",onclick:()=>{state.activityCandidate=null;state.activityRender=null;render(state.lastStatus);},"aria-label":"Close clip activity"},"Close")]),
     liveTask?el("div",{class:"live-agent"},[el("span",{class:"pulse"}),el("strong",{},"Hermes Publisher"),el("span",{},String(liveTask.status||"queued").replaceAll("_"," ")),liveTask.current_run_id?el("code",{},liveTask.current_run_id):""]):"",
+    observedRender?publisherConsole(observedRender,liveTask):"",
     el("div",{class:"activity-timeline"},entries.length?entries.map(entry=>{const role=roles[entry.role]||roles.system;return el("article",{class:"activity-entry","data-role":entry.role},[el("span",{class:"agent-avatar"},role.initials),el("div",{class:"activity-copy"},[el("div",{class:"activity-line"},[el("strong",{},role.label),el("span",{class:`activity-status ${entry.status}`},String(entry.status).replaceAll("_"," ")),el("time",{},formatActivityTime(entry.created_at))]),el("p",{},entry.message),entry.render_id?el("code",{},entry.render_id):""])]);}):[el("p",{class:"muted"},"No activity has been recorded for this clip yet.")]),
+  ]);
+}
+
+function publisherConsole(renderItem,telemetry) {
+  const progress = renderItem.publisher_progress || {status:telemetry?.status||"waiting",phase:telemetry?.status||"waiting",percent:telemetry?.status==="running"?20:10,message:"Waiting for Hermes publishing telemetry.",platforms:[]};
+  const result = renderItem.publisher_result;
+  const resultPlatforms = Array.isArray(result?.platforms) ? result.platforms : [];
+  const progressPlatforms = Array.isArray(progress.platforms) ? progress.platforms : [];
+  const platforms = ["youtube","tiktok"].map(name=>resultPlatforms.find(item=>item.platform===name)||progressPlatforms.find(item=>item.platform===name)||{platform:name,status:"waiting"});
+  const detail = telemetry?.detail || {};
+  const events = Array.isArray(detail.events) ? detail.events.slice().reverse() : [];
+  const runs = Array.isArray(detail.runs) ? detail.runs : [];
+  const messages = Array.isArray(telemetry?.sessionMessages?.messages) ? telemetry.sessionMessages.messages : [];
+  const sessionId = telemetry?.sessionId;
+  const sessionHref = sessionId ? `/chat?resume=${encodeURIComponent(sessionId)}` : null;
+  const inspect = telemetry?.inspect;
+  const phases = ["Prepared","Hermes","YouTube","TikTok","Verified"];
+  return el("section",{class:"publisher-console"},[
+    el("div",{class:"progress-head"},[el("div",{},[el("span",{class:`execution-dot ${progress.status}`}),el("strong",{},String(progress.phase||progress.status).replaceAll("_"," ")),el("p",{},progress.message)]),el("strong",{class:"progress-percent"},`${progress.percent}%`)]),
+    el("div",{class:"progress-track"},el("span",{style:`width:${progress.percent}%`})),
+    el("div",{class:"progress-steps"},phases.map((label,index)=>el("span",{class:progress.percent>=index*22+5?"done":""},label))),
+    el("div",{class:"platform-grid"},platforms.map(item=>{const href=verifiedLink(item.url);return el("article",{class:`platform-card ${item.status||"waiting"}`},[el("span",{class:"platform-name"},item.platform),el("strong",{},String(item.status||"waiting").replaceAll("_"," ")),href?el("a",{href,target:"_blank",rel:"noreferrer"},"Open published post ↗"):el("small",{},item.receipt||"No verified link yet")]);})),
+    telemetry?el("div",{class:"telemetry-grid"},[el("div",{},[el("span",{},"Task"),el("code",{},telemetry.id||renderItem.publisher_task_id||"—")]),el("div",{},[el("span",{},"Run"),el("code",{},telemetry.current_run_id||telemetry.run?.id||"—")]),el("div",{},[el("span",{},"Worker"),el("code",{},telemetry.worker_pid||telemetry.run?.worker_pid||"—")]),el("div",{},[el("span",{},"Process"),el("code",{},inspect?.alive?`${inspect.cpu_percent??"?"}% CPU · ${formatBytes(inspect.memory_rss_bytes)}`:inspect?.reason||"not running")])]):"",
+    sessionHref?el("a",{class:"session-link",href:sessionHref,target:"_blank",rel:"noreferrer"},[`Open Hermes session`,el("code",{},sessionId),"↗"]):el("p",{class:"session-pending"},"Hermes session link will appear when the worker reports its session ID."),
+    el("div",{class:"log-stack"},[
+      el("details",{open:"true"},[el("summary",{},[`Task events`,el("span",{},events.length)]),el("div",{class:"native-events"},events.length?events.slice(0,30).map(event=>el("div",{},[el("time",{},formatActivityTime(event.created_at)),el("strong",{},event.kind),el("code",{},redactLog(event.payload,700))])):[el("p",{class:"muted"},"No native task events yet.")])]),
+      el("details",{},[el("summary",{},[`Hermes session messages`,el("span",{},messages.length)]),el("div",{class:"session-messages"},messages.length?messages.slice(-80).map(message=>el("article",{},[el("div",{},[el("strong",{},message.tool_name||message.role),el("time",{},formatActivityTime(message.timestamp))]),el("pre",{},redactLog(message.content||message.tool_calls||"",1800))])):[el("p",{class:"muted"},sessionId?"No session messages returned yet.":"Waiting for a worker session ID.")])]),
+      el("details",{},[el("summary",{},[`Run attempts`,el("span",{},runs.length)]),el("div",{class:"run-attempts"},runs.length?runs.map(run=>el("article",{},[el("strong",{},`Run ${run.id} · ${run.status}`),el("p",{},run.summary||run.error||run.outcome||"No summary yet"),el("time",{},formatActivityTime(run.started_at))])):[el("p",{class:"muted"},"No run attempts yet.")])]),
+      el("details",{},[el("summary",{},[`Worker stdout / stderr`,el("span",{},formatBytes(telemetry?.workerLog?.size_bytes||0))]),el("pre",{class:"worker-log"},redactLog(telemetry?.workerLog?.content||telemetry?.workerLog?.error||"Worker log is not available yet."))]),
+    ]),
   ]);
 }
 
@@ -277,7 +347,7 @@ function candidateCard(c) {
   const readyRender = latestReadyRender(c.id);
   const primaryAction = readyRender ? el("button",{class:"view-render",onclick:()=>openRenderedClip(c.id).catch(error=>showError(error.message))},"View rendered clip") : el("button",{onclick:()=>action("render"),...(busy?{disabled:"true"}:{})},busy?"Rendering…":"Render clip");
   const rationale = oneSentence(c.rationale, "Hermes ranked this as a strong standalone moment with a clear payoff.");
-  return el("article", {class:`candidate ${state.selectedCandidates.has(c.id)?"selected-for-cleanup":""}`}, [selectionCheckbox("candidate",c.id,`Select suggestion ${c.title}`),el("div",{class:"score","aria-label":`${Math.round(c.confidence*100)} out of 100 clip score`},[el("strong",{},`${Math.round(c.confidence*100)}`),el("span",{},"/ 100"),el("small",{},"CLIP SCORE")]),el("div",{class:"candidate-copy"},[el("h4",{},c.title),c.hook?el("p",{class:"candidate-hook"},c.hook):"",el("div",{class:"hook-rationale"},[el("span",{},"WHY IT HOOKS"),el("p",{},rationale)]),el("small",{class:"candidate-meta"},`${formatDuration(c.end_seconds-c.start_seconds)} · ${c.state.replaceAll("_"," ")}`),el("div",{class:"actions"},[primaryAction,el("button",{class:"secondary",onclick:()=>action("accept")},"Accept"),el("button",{class:"ghost",onclick:()=>action("reject")},"Reject"),el("button",{class:"ghost",onclick:()=>{state.activityCandidate=c.id;render(state.lastStatus);}},"Activity")])])]);
+  return el("article", {class:`candidate ${state.selectedCandidates.has(c.id)?"selected-for-cleanup":""}`}, [selectionCheckbox("candidate",c.id,`Select suggestion ${c.title}`),el("div",{class:"score","aria-label":`${Math.round(c.confidence*100)} out of 100 clip score`},[el("strong",{},`${Math.round(c.confidence*100)}`),el("span",{},"/ 100"),el("small",{},"CLIP SCORE")]),el("div",{class:"candidate-copy"},[el("h4",{},c.title),c.hook?el("p",{class:"candidate-hook"},c.hook):"",el("div",{class:"hook-rationale"},[el("span",{},"WHY IT HOOKS"),el("p",{},rationale)]),el("small",{class:"candidate-meta"},`${formatDuration(c.end_seconds-c.start_seconds)} · ${c.state.replaceAll("_"," ")}`),el("div",{class:"actions"},[primaryAction,el("button",{class:"secondary",onclick:()=>action("accept")},"Accept"),el("button",{class:"ghost",onclick:()=>action("reject")},"Reject"),el("button",{class:"ghost",onclick:()=>{state.activityCandidate=c.id;state.activityRender=null;render(state.lastStatus);}},"Activity")])])]);
 }
 
 async function previewClip(renderItem) {
@@ -309,6 +379,8 @@ async function sendToHermesPublisher(renderItem) {
   const taskId = task.id || task.task_id || result.taskId || null;
   if (!taskId) throw new Error("Hermes created a publisher task without returning its task ID");
   await request(`/renders/${renderItem.id}/publisher-handoff/complete`, {method:"POST", body:JSON.stringify({task_id:taskId})});
+  state.activityCandidate = renderItem.candidate_id;
+  state.activityRender = renderItem.id;
   showNotice(`Hermes publisher task ${taskId} is queued on this Mac. Publication will only be shown after verified platform receipts.`);
   await refresh();
 }
@@ -339,10 +411,23 @@ function clipCard(item, mode = "editor") {
   const finished = ["completed","done","blocked","failed","timed_out","gave_up"].includes(taskStatus) || Boolean(receipt);
   const tracked = Boolean(item.publisher_task_id);
   const publisherLabel = published ? "Published to TikTok + YouTube" : active ? `Hermes ${taskStatus}…` : taskStatus === "unavailable" ? "Hermes status unavailable" : finished ? `Hermes ${receipt?.status || taskStatus}` : item.publisher_status === "prepared" ? "Retry Hermes publisher" : "Publish with Hermes";
-  const statusText = receipt?.summary || (taskStatus && taskStatus !== "prepared" ? `Hermes task ${item.publisher_task_id || ""} · ${taskStatus}` : "Hermes will use the signed-in TikTok and YouTube accounts.");
+  const statusText = receipt?.summary || item.publisher_progress?.message || (taskStatus && taskStatus !== "prepared" ? `Hermes task ${item.publisher_task_id || ""} · ${taskStatus}` : "Hermes will use the signed-in TikTok and YouTube accounts.");
   const locked = tracked || active || finished || published;
-  const roleAction = mode === "publisher" ? el("button",{class:"publisher",onclick:()=>sendToHermesPublisher(item).catch(error=>{showNotice("");showError(error.message);}),...(locked?{disabled:"true"}:{})},publisherLabel) : el("button",{class:"publisher",onclick:()=>{state.activeTab="publisher";state.activityCandidate=item.candidate_id;render(state.lastStatus);}},"Open in Publisher");
-  return el("article",{class:`clip-card ${state.preview?.id===item.id?"selected":""} ${state.selectedRenders.has(item.id)?"selected-for-cleanup":""}`},[selectionCheckbox("render",item.id,`Select render ${item.title} version ${item.version}`),el("div",{class:"clip-card-top"},[el("span",{class:"version"},`v${item.version}`),el("span",{class:`ready-dot ${published?"published":""}`},published?"published":active?"Hermes working":"ready")]),el("h4",{},item.title),el("p",{class:"clip-meta"},`${formatDuration(item.duration)} · ${formatBytes(item.size_bytes)} · ${item.start_seconds.toFixed(1)}–${item.end_seconds.toFixed(1)}s`),el("p",{class:"publisher-status"},statusText),el("div",{class:"actions clip-actions"},[el("button",{onclick:()=>previewClip(item).catch(error=>showError(error.message))},"Preview"),el("button",{class:"secondary",onclick:()=>saveClip(item).catch(error=>showError(error.message))},"Save MP4"),roleAction,el("button",{class:"ghost",onclick:()=>{state.activityCandidate=item.candidate_id;render(state.lastStatus);}},"Activity")])]);
+  const roleAction = mode === "publisher" ? el("button",{class:"publisher",onclick:()=>sendToHermesPublisher(item).catch(error=>{showNotice("");showError(error.message);}),...(locked?{disabled:"true"}:{})},publisherLabel) : el("button",{class:"publisher",onclick:()=>{state.activeTab="publisher";state.activityCandidate=item.candidate_id;state.activityRender=item.id;render(state.lastStatus);}},"Open in Publisher");
+  const consoleLabel = mode === "publisher" && (tracked||item.publisher_progress) ? "Publisher console" : "Activity";
+  return el("article",{class:`clip-card ${state.preview?.id===item.id?"selected":""} ${state.selectedRenders.has(item.id)?"selected-for-cleanup":""}`},[selectionCheckbox("render",item.id,`Select render ${item.title} version ${item.version}`),el("div",{class:"clip-card-top"},[el("span",{class:"version"},`v${item.version}`),el("span",{class:`ready-dot ${published?"published":""}`},published?"published":active?"Hermes working":"ready")]),el("h4",{},item.title),el("p",{class:"clip-meta"},`${formatDuration(item.duration)} · ${formatBytes(item.size_bytes)} · ${item.start_seconds.toFixed(1)}–${item.end_seconds.toFixed(1)}s`),el("p",{class:"publisher-status"},statusText),mode==="publisher"?publisherMiniProgress(item):"",receiptLinks(receipt),el("div",{class:"actions clip-actions"},[el("button",{onclick:()=>previewClip(item).catch(error=>showError(error.message))},"Preview"),el("button",{class:"secondary",onclick:()=>saveClip(item).catch(error=>showError(error.message))},"Save MP4"),roleAction,el("button",{class:"ghost",onclick:()=>{state.activityCandidate=item.candidate_id;state.activityRender=mode==="publisher"?item.id:null;render(state.lastStatus);}},consoleLabel)])]);
+}
+
+function publisherMiniProgress(item) {
+  const progress = item.publisher_progress;
+  if (!progress) return "";
+  return el("div",{class:"mini-progress"},[el("div",{},[el("span",{style:`width:${progress.percent}%`})]),el("small",{},`${progress.percent}% · ${String(progress.phase||progress.status).replaceAll("_"," ")}`)]);
+}
+
+function receiptLinks(receipt) {
+  const links = (receipt?.platforms || []).map(item=>({platform:item.platform,href:verifiedLink(item.url)})).filter(item=>item.href);
+  if (!links.length) return "";
+  return el("div",{class:"receipt-links"},links.map(item=>el("a",{href:item.href,target:"_blank",rel:"noreferrer"},`${item.platform} ↗`)));
 }
 
 function transcriptPanel(words) {

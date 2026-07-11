@@ -326,9 +326,54 @@ class LiveClipperService:
             result_path = (
                 self.settings.root / "publisher_outbox" / item["id"] / "publisher-result.json"
             )
+            progress_path = (
+                self.settings.root / "publisher_outbox" / item["id"] / "publisher-progress.json"
+            )
             item["publisher_result"] = self._read_publisher_result(result_path)
+            item["publisher_progress"] = self._read_publisher_progress(progress_path)
             renders.append(item)
         return renders
+
+    @staticmethod
+    def _read_publisher_progress(path: Path) -> dict[str, Any] | None:
+        if not path.is_file():
+            return None
+        try:
+            progress = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {
+                "status": "invalid",
+                "phase": "invalid",
+                "percent": 0,
+                "message": "Publisher progress could not be read",
+            }
+        if not isinstance(progress, dict):
+            return {
+                "status": "invalid",
+                "phase": "invalid",
+                "percent": 0,
+                "message": "Publisher progress is malformed",
+            }
+        try:
+            percent = max(0, min(100, int(progress.get("percent", 0))))
+        except (TypeError, ValueError):
+            percent = 0
+        return {
+            "status": str(progress.get("status") or "working")[:40],
+            "phase": str(progress.get("phase") or "working")[:60],
+            "percent": percent,
+            "message": str(progress.get("message") or "Hermes publisher is working.")[:500],
+            "platforms": progress.get("platforms")
+            if isinstance(progress.get("platforms"), list)
+            else [],
+            "updated_at": progress.get("updated_at"),
+        }
+
+    @staticmethod
+    def _write_publisher_progress(path: Path, progress: dict[str, Any]) -> None:
+        temporary = path.with_name(f".{path.name}.tmp")
+        temporary.write_text(json.dumps(progress, indent=2) + "\n")
+        os.replace(temporary, path)
 
     @staticmethod
     def _read_publisher_result(path: Path) -> dict[str, Any] | None:
@@ -392,6 +437,7 @@ class LiveClipperService:
 
             now = datetime.now(UTC).isoformat()
             result_path = outbox / "publisher-result.json"
+            progress_path = outbox / "publisher-progress.json"
             metadata = {
                 "asset_id": f"live-clipper-{render_id}",
                 "render_id": render_id,
@@ -406,6 +452,21 @@ class LiveClipperService:
             metadata_tmp = outbox / ".handoff.json.tmp"
             metadata_tmp.write_text(json.dumps(metadata, indent=2) + "\n")
             os.replace(metadata_tmp, outbox / "handoff.json")
+            if not progress_path.exists():
+                self._write_publisher_progress(
+                    progress_path,
+                    {
+                        "status": "prepared",
+                        "phase": "asset_prepared",
+                        "percent": 5,
+                        "message": "Verified and preserved the MP4 for the Hermes publisher.",
+                        "platforms": [
+                            {"platform": "youtube", "status": "waiting"},
+                            {"platform": "tiktok", "status": "waiting"},
+                        ],
+                        "updated_at": now,
+                    },
+                )
             self.db.execute(
                 "INSERT INTO publisher_handoffs(render_id,outbox_path,status) VALUES(?,?,'prepared') "
                 "ON CONFLICT(render_id) DO UPDATE SET outbox_path=excluded.outbox_path,"
@@ -431,6 +492,7 @@ This task was created only after the user confirmed a dashboard warning that the
 Immutable source MP4: {clip_path}
 Handoff metadata: {outbox / "handoff.json"}
 Publisher result file: {result_path}
+Publisher progress file: {progress_path}
 Render id: {render_id}
 Source URL: {item["canonical_url"]}
 Suggested title: {item["title"]}
@@ -442,9 +504,12 @@ Execution requirements:
 4. For TikTok, use browser/computer-use with the already signed-in local Chrome account. Stop as blocked if login, 2FA, account selection, or a final human decision is required.
 5. Never claim success from an upload attempt or process exit alone. Verify each real platform receipt.
 6. Do not expose credentials, cookies, or temporary upload tokens in logs or artifacts.
-7. Atomically write {result_path} as JSON before completing. Use a temporary sibling file and rename it. Schema:
+7. Keep {progress_path} current throughout the run. Atomically replace it after every milestone using this schema:
+   {{"status":"working|blocked|failed|published","phase":"planning|youtube_uploading|youtube_published|tiktok_uploading|tiktok_published|verifying|complete","percent":0-100,"message":"plain-language current action","platforms":[{{"platform":"youtube|tiktok","status":"waiting|uploading|published|blocked|failed","url":"verified URL when available"}}],"updated_at":"ISO-8601"}}
+   Use approximately 15% for planning, 30% for YouTube upload, 50% after verified YouTube publication, 65% for TikTok upload, 85% after verified TikTok publication, 95% while verifying receipts, and 100% only after the final result is written.
+8. Atomically write {result_path} as JSON before completing. Use a temporary sibling file and rename it. Schema:
    {{"status":"published|partial|blocked|upload_ready|failed","summary":"...","platforms":[{{"platform":"youtube|tiktok","status":"published|blocked|failed","url":"verified public or studio URL when available","receipt":"video/post id or concise verification"}}],"completed_at":"ISO-8601"}}
-8. Set status=published only when both YouTube and TikTok have verified receipts. Use partial when exactly one succeeded.
+9. Set status=published only when both YouTube and TikTok have verified receipts. Use partial when exactly one succeeded.
 
 Final response must repeat the truthful status, receipts, and any action the user must take."""
 
@@ -481,6 +546,21 @@ Final response must repeat the truthful status, receipts, and any action the use
             "UPDATE publisher_handoffs SET status='queued',task_id=?,"
             "updated_at=CURRENT_TIMESTAMP WHERE render_id=?",
             (task_id, render_id),
+        )
+        progress_path = (
+            self.settings.root / "publisher_outbox" / render_id / "publisher-progress.json"
+        )
+        progress = self._read_publisher_progress(progress_path) or {}
+        self._write_publisher_progress(
+            progress_path,
+            {
+                **progress,
+                "status": "queued",
+                "phase": "queued",
+                "percent": max(10, int(progress.get("percent", 0) or 0)),
+                "message": "Hermes publishing task is queued and waiting for a worker.",
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
         )
         if row["status"] != "queued" or row["task_id"] != task_id:
             self.db.clip_activity(

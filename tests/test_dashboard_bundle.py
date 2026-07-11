@@ -25,6 +25,14 @@ def test_dashboard_bundle_registers_with_host_and_uses_authenticated_fetch():
     assert "latestReadyRender" in bundle
     assert "View rendered clip" in bundle
     assert "Render another version" not in bundle
+    assert "publisherConsole" in bundle
+    assert "publisher_progress" in bundle
+    assert "/log?tail=100000" in bundle
+    assert "/messages?limit=500" in bundle
+    assert "Open Hermes session" in bundle
+    assert "Open published post" in bundle
+    assert "Worker stdout / stderr" in bundle
+    assert "redactLog" in bundle
     assert "Review deletion" in bundle
     assert "Reject remains non-destructive" in bundle
     assert 'request("/cleanup/preview"' in bundle
