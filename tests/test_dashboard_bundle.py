@@ -25,3 +25,10 @@ def test_dashboard_bundle_registers_with_host_and_uses_authenticated_fetch():
     assert "latestReadyRender" in bundle
     assert "View rendered clip" in bundle
     assert "Render another version" not in bundle
+    assert "Review deletion" in bundle
+    assert "Reject remains non-destructive" in bundle
+    assert 'request("/cleanup/preview"' in bundle
+    assert 'request("/cleanup/execute"' in bundle
+    assert "Select stopped" in bundle
+    assert "Select failed renders" in bundle
+    assert "force_publisher_assets" in bundle

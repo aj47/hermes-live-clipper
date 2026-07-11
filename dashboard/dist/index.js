@@ -9,7 +9,7 @@
   const h = React.createElement;
   const { useEffect } = SDK.hooks;
   const api = "/api/plugins/hermes-live-clipper";
-const state = { selected: null, detail: null, activeTab: "analyst", preview: null, lastStatus: null, notice: "", publisherTasks: {}, activityCandidate: null };
+const state = { selected: null, detail: null, activeTab: "analyst", preview: null, lastStatus: null, notice: "", publisherTasks: {}, activityCandidate: null, selectedJobs: new Set(), selectedCandidates: new Set(), selectedRenders: new Set(), cleanupPlan: null };
 const publisherBoard = "live-clipper-publishing";
 
 const el = (tag, props = {}, children = []) => {
@@ -70,6 +70,63 @@ function oneSentence(value, fallback) {
   return short && !/[.!?…]$/.test(short) ? `${short}.` : short;
 }
 
+function selectionSet(kind) {
+  return kind === "job" ? state.selectedJobs : kind === "candidate" ? state.selectedCandidates : state.selectedRenders;
+}
+
+function toggleSelection(kind, id, checked) {
+  const selected = selectionSet(kind);
+  checked ? selected.add(id) : selected.delete(id);
+  state.cleanupPlan = null;
+  render(state.lastStatus);
+}
+
+function selectionCheckbox(kind, id, label, disabled = false) {
+  const input = el("input",{type:"checkbox","aria-label":label,...(selectionSet(kind).has(id)?{checked:"true"}:{}),...(disabled?{disabled:"true"}:{}),onchange:event=>toggleSelection(kind,id,event.target.checked)});
+  return el("label",{class:`selection-check ${kind}-selection ${disabled?"disabled":""}`,title:disabled?"Stop active work before deleting it":label},[input,el("span",{"aria-hidden":"true"})]);
+}
+
+function selectionPayload(forcePublisherAssets = false) {
+  return {
+    job_ids:[...state.selectedJobs],
+    candidate_ids:[...state.selectedCandidates],
+    render_ids:[...state.selectedRenders],
+    force_publisher_assets:forcePublisherAssets,
+  };
+}
+
+function selectedCount() {
+  return state.selectedJobs.size + state.selectedCandidates.size + state.selectedRenders.size;
+}
+
+function clearSelection() {
+  state.selectedJobs.clear();
+  state.selectedCandidates.clear();
+  state.selectedRenders.clear();
+  state.cleanupPlan = null;
+}
+
+async function reviewCleanup(forcePublisherAssets = false) {
+  state.cleanupPlan = await request("/cleanup/preview",{method:"POST",body:JSON.stringify(selectionPayload(forcePublisherAssets))});
+  render(state.lastStatus);
+}
+
+async function executeCleanup() {
+  const plan = state.cleanupPlan;
+  if (!plan || plan.blocked.length) return;
+  const total = Object.values(plan.counts).reduce((sum,value)=>sum+Number(value||0),0);
+  if (!window.confirm(`Permanently delete this selection and reclaim ${formatBytes(plan.reclaimable_bytes)}? This removes media files and cannot be undone.`)) return;
+  const deletedSelectedJob = plan.selection.job_ids.includes(state.selected);
+  const result = await request("/cleanup/execute",{method:"POST",body:JSON.stringify({...selectionPayload(plan.force_publisher_assets),expected_bytes:plan.reclaimable_bytes})});
+  if (state.preview?.url) URL.revokeObjectURL(state.preview.url);
+  state.preview = null;
+  state.activityCandidate = null;
+  clearSelection();
+  if (deletedSelectedJob) { state.selected = null; state.detail = null; }
+  showNotice(`Deleted ${total} database records and reclaimed ${formatBytes(result.reclaimable_bytes)}.`);
+  await refresh();
+}
+
 async function refresh({ passive = false } = {}) {
   try {
     const currentPlayer = document.querySelector(".clip-player video");
@@ -106,8 +163,25 @@ function render(status) {
   root.replaceChildren(
     el("header", {class:"hero"}, [el("div", {}, [el("p", {class:"eyebrow"}, "HERMES MEDIA WORKER"), el("h1", {}, "Live Clipper"), el("p", {class:"dek"}, "Turn a public livestream into transcript-grounded draft clips while it is still live.")]), resourcePills(status)]),
     el("section", {class:"submit-card"}, [jobForm(), el("p", {class:"legal"}, "Only clip content you are authorized to use. Public availability does not grant redistribution rights."), el("p", {id:"hlc-notice", class:"success"}, state.notice), el("p", {id:"hlc-error", class:"error"})]),
-    el("div", {class:"workspace"}, [jobList(status.jobs), detailPanel()])
+    el("div", {class:"workspace"}, [jobList(status.jobs), detailPanel()]),
+    bulkSelectionBar(),
+    cleanupReview()
   );
+}
+
+function bulkSelectionBar() {
+  const count = selectedCount();
+  if (!count) return "";
+  return el("aside",{class:"bulk-bar","aria-label":"Bulk actions"},[el("div",{},[el("strong",{},`${count} selected`),el("span",{},`${state.selectedJobs.size} streams · ${state.selectedCandidates.size} suggestions · ${state.selectedRenders.size} renders`)]),el("button",{class:"ghost",onclick:()=>{clearSelection();render(state.lastStatus);}},"Clear"),el("button",{onclick:()=>reviewCleanup().catch(error=>showError(error.message))},"Review deletion")]);
+}
+
+function cleanupReview() {
+  const plan = state.cleanupPlan;
+  if (!plan) return "";
+  const publisherBlocks = plan.blocked.filter(item=>item.kind==="publisher_asset");
+  const hardBlocks = plan.blocked.filter(item=>item.kind!=="publisher_asset");
+  const hasPublisherAssets = Number(plan.counts.publisher_handoffs||0)>0;
+  return el("div",{class:"cleanup-scrim",role:"dialog","aria-modal":"true","aria-label":"Review deletion"},[el("section",{class:"cleanup-review"},[el("div",{class:"cleanup-head"},[el("div",{},[el("p",{class:"eyebrow"},"STORAGE CLEANUP"),el("h2",{},"Review permanent deletion"),el("p",{class:"muted"},"Reject remains non-destructive. This action removes the selected media and database records.")]),el("button",{class:"ghost",onclick:()=>{state.cleanupPlan=null;render(state.lastStatus);},"aria-label":"Close deletion review"},"Close")]),el("div",{class:"reclaim-number"},[el("strong",{},formatBytes(plan.reclaimable_bytes)),el("span",{},"reclaimable")]),el("div",{class:"cleanup-counts"},Object.entries(plan.counts).filter(([,value])=>value).map(([key,value])=>el("div",{},[el("strong",{},value),el("span",{},key.replaceAll("_"," "))]))),plan.warnings.map(message=>el("p",{class:"cleanup-warning"},message)),hardBlocks.map(item=>el("p",{class:"cleanup-blocked"},item.message)),hasPublisherAssets?el("label",{class:"force-cleanup"},[el("input",{type:"checkbox",...(plan.force_publisher_assets?{checked:"true"}:{}),onchange:event=>reviewCleanup(event.target.checked).catch(error=>showError(error.message))}),el("span",{},[el("strong",{},"Also delete publisher assets"),el("small",{},publisherBlocks.length?"Required before deletion; preserved media or a Hermes task still references this render.":"Enabled: publisher handoffs and preserved outbox media will also be removed.")])]):"",el("div",{class:"cleanup-actions"},[el("button",{class:"ghost",onclick:()=>{state.cleanupPlan=null;render(state.lastStatus);}},"Cancel"),el("button",{class:"danger",...(plan.blocked.length?{disabled:"true"}:{}),onclick:()=>executeCleanup().catch(error=>showError(error.message))},plan.blocked.length?"Resolve protected items":`Delete and reclaim ${formatBytes(plan.reclaimable_bytes)}`)])])]);
 }
 
 function resourcePills(status) {
@@ -123,7 +197,10 @@ function jobForm() {
 }
 
 function jobList(jobs) {
-  return el("aside", {class:"jobs"}, [el("div", {class:"section-title"}, [el("h2", {}, "Streams"), el("span", {}, `${jobs.length}`)]), ...jobs.map(job => el("button", {class:`job ${job.id===state.selected?"selected":""}`, onclick:()=>{state.selected=job.id;refresh();}}, [el("strong", {}, job.title || job.external_id || "Resolving stream"), el("small", {}, job.provider || "source"), el("span", {class:`badge ${job.state}`}, job.state.replaceAll("_"," "))]))]);
+  const terminal = new Set(["stopped","completed","failed","needs_attention"]);
+  const selectable = jobs.filter(job=>terminal.has(job.state));
+  const allSelected = selectable.length>0 && selectable.every(job=>state.selectedJobs.has(job.id));
+  return el("aside", {class:"jobs"}, [el("div", {class:"section-title"}, [el("h2", {}, "Streams"),el("button",{class:"select-all",...(selectable.length?{}:{disabled:"true"}),onclick:()=>{selectable.forEach(job=>allSelected?state.selectedJobs.delete(job.id):state.selectedJobs.add(job.id));state.cleanupPlan=null;render(state.lastStatus);}},allSelected?"Clear":"Select stopped"),el("span", {}, `${jobs.length}`)]), ...jobs.map(job => el("div",{class:`job-row ${job.id===state.selected?"selected":""}`},[selectionCheckbox("job",job.id,`Select stream ${job.title||job.external_id||job.id}`,!terminal.has(job.state)),el("button", {class:"job", onclick:()=>{state.selected=job.id;state.activityCandidate=null;refresh();}}, [el("strong", {}, job.title || job.external_id || "Resolving stream"), el("small", {}, job.provider || "source"), el("span", {class:`badge ${job.state}`}, job.state.replaceAll("_"," "))])]))]);
 }
 
 function detailPanel() {
@@ -176,7 +253,8 @@ function activityPanel() {
 }
 
 function candidatePanel(candidates) {
-  return el("div", {class:"panel tab-panel role-panel analyst-panel"}, [el("div", {class:"section-title"}, [el("div",{},[el("p",{class:"role-kicker"},"STORY ANALYST · AGENT 01"),el("h3",{},"Editorial opportunities"),el("p",{class:"muted"},"Hermes reviews the rolling transcript, scores each hook, and explains why the moment can stand alone.")]),el("span",{},`${candidates.length}`)]), el("div",{class:"candidate-grid"},candidates.length?candidates.map(candidateCard):[el("p",{class:"muted"},"Suggestions begin after five minutes of transcribed speech.")])]);
+  const allSelected = candidates.length>0 && candidates.every(item=>state.selectedCandidates.has(item.id));
+  return el("div", {class:"panel tab-panel role-panel analyst-panel"}, [el("div", {class:"section-title"}, [el("div",{},[el("p",{class:"role-kicker"},"STORY ANALYST · AGENT 01"),el("h3",{},"Editorial opportunities"),el("p",{class:"muted"},"Hermes reviews the rolling transcript, scores each hook, and explains why the moment can stand alone.")]),el("div",{class:"section-tools"},[el("button",{class:"select-all",...(candidates.length?{}:{disabled:"true"}),onclick:()=>{candidates.forEach(item=>allSelected?state.selectedCandidates.delete(item.id):state.selectedCandidates.add(item.id));state.cleanupPlan=null;render(state.lastStatus);}},allSelected?"Clear selection":"Select all"),el("span",{},`${candidates.length}`)])]), el("div",{class:"candidate-grid"},candidates.length?candidates.map(candidateCard):[el("p",{class:"muted"},"Suggestions begin after five minutes of transcribed speech.")])]);
 }
 
 function latestReadyRender(candidateId) {
@@ -199,7 +277,7 @@ function candidateCard(c) {
   const readyRender = latestReadyRender(c.id);
   const primaryAction = readyRender ? el("button",{class:"view-render",onclick:()=>openRenderedClip(c.id).catch(error=>showError(error.message))},"View rendered clip") : el("button",{onclick:()=>action("render"),...(busy?{disabled:"true"}:{})},busy?"Rendering…":"Render clip");
   const rationale = oneSentence(c.rationale, "Hermes ranked this as a strong standalone moment with a clear payoff.");
-  return el("article", {class:"candidate"}, [el("div",{class:"score","aria-label":`${Math.round(c.confidence*100)} out of 100 clip score`},[el("strong",{},`${Math.round(c.confidence*100)}`),el("span",{},"/ 100"),el("small",{},"CLIP SCORE")]),el("div",{class:"candidate-copy"},[el("h4",{},c.title),c.hook?el("p",{class:"candidate-hook"},c.hook):"",el("div",{class:"hook-rationale"},[el("span",{},"WHY IT HOOKS"),el("p",{},rationale)]),el("small",{class:"candidate-meta"},`${formatDuration(c.end_seconds-c.start_seconds)} · ${c.state.replaceAll("_"," ")}`),el("div",{class:"actions"},[primaryAction,el("button",{class:"secondary",onclick:()=>action("accept")},"Accept"),el("button",{class:"ghost",onclick:()=>action("reject")},"Reject"),el("button",{class:"ghost",onclick:()=>{state.activityCandidate=c.id;render(state.lastStatus);}},"Activity")])])]);
+  return el("article", {class:`candidate ${state.selectedCandidates.has(c.id)?"selected-for-cleanup":""}`}, [selectionCheckbox("candidate",c.id,`Select suggestion ${c.title}`),el("div",{class:"score","aria-label":`${Math.round(c.confidence*100)} out of 100 clip score`},[el("strong",{},`${Math.round(c.confidence*100)}`),el("span",{},"/ 100"),el("small",{},"CLIP SCORE")]),el("div",{class:"candidate-copy"},[el("h4",{},c.title),c.hook?el("p",{class:"candidate-hook"},c.hook):"",el("div",{class:"hook-rationale"},[el("span",{},"WHY IT HOOKS"),el("p",{},rationale)]),el("small",{class:"candidate-meta"},`${formatDuration(c.end_seconds-c.start_seconds)} · ${c.state.replaceAll("_"," ")}`),el("div",{class:"actions"},[primaryAction,el("button",{class:"secondary",onclick:()=>action("accept")},"Accept"),el("button",{class:"ghost",onclick:()=>action("reject")},"Reject"),el("button",{class:"ghost",onclick:()=>{state.activityCandidate=c.id;render(state.lastStatus);}},"Activity")])])]);
 }
 
 async function previewClip(renderItem) {
@@ -242,12 +320,13 @@ function clipsPanel(renders, mode = "editor") {
   const previewItem = ready.find(item => item.id === state.preview?.id);
   const publisherMode = mode === "publisher";
   const ordered = publisherMode ? [...ready].sort((a,b)=>Number(Boolean(b.publisher_status))-Number(Boolean(a.publisher_status))||b.confidence-a.confidence) : ready;
+  const allSelected = ready.length>0 && ready.every(item=>state.selectedRenders.has(item.id));
   return el("div", {class:`tab-panel clips-view role-panel ${publisherMode?"publisher-panel":"editor-panel"}`}, [
     previewItem ? el("section",{class:"clip-player"},[el("div",{class:"player-copy"},[el("p",{class:"eyebrow"},`VERSION ${previewItem.version}`),el("h3",{},previewItem.title),el("p",{class:"muted"},`${formatDuration(previewItem.duration)} · ${Math.round(previewItem.confidence*100)} confidence`)]),el("video",{src:state.preview.url,controls:"true",preload:"metadata"})]) : "",
-    el("div", {class:"section-title"}, [el("div",{},[el("p",{class:"role-kicker"},publisherMode?"PUBLISHER & GROWTH · AGENT 03":"VIDEO EDITOR · AGENT 02"),el("h3",{},publisherMode?"Publishing desk":"Rendered drafts"),el("p",{class:"muted"},publisherMode?"Package approved drafts, dispatch Hermes, and verify real platform receipts.":"Preview, verify, and hand finished drafts to the publishing desk.")]),el("span",{},`${ready.length} ready`)]),
+    el("div", {class:"section-title"}, [el("div",{},[el("p",{class:"role-kicker"},publisherMode?"PUBLISHER & GROWTH · AGENT 03":"VIDEO EDITOR · AGENT 02"),el("h3",{},publisherMode?"Publishing desk":"Rendered drafts"),el("p",{class:"muted"},publisherMode?"Package approved drafts, dispatch Hermes, and verify real platform receipts.":"Preview, verify, and hand finished drafts to the publishing desk.")]),el("div",{class:"section-tools"},[el("button",{class:"select-all",...(ready.length?{}:{disabled:"true"}),onclick:()=>{ready.forEach(item=>allSelected?state.selectedRenders.delete(item.id):state.selectedRenders.add(item.id));state.cleanupPlan=null;render(state.lastStatus);}},allSelected?"Clear selection":"Select all"),el("span",{},`${ready.length} ready`)])]),
     !publisherMode&&inFlight.length ? el("div",{class:"render-strip"},inFlight.map(item=>el("span",{},`${item.title} · rendering`))) : "",
     el("div",{class:"clip-grid"},ordered.length?ordered.map(item=>clipCard(item,mode)):[el("p",{class:"muted"},"No completed clips yet. Render a suggestion or wait for automatic drafts.")]),
-    !publisherMode&&failed.length ? el("details",{class:"failed-renders"},[el("summary",{},`${failed.length} earlier failed render versions`),...failed.map(item=>el("p",{},`v${item.version} · ${item.title} · ${item.error||"failed"}`))]) : "",
+    !publisherMode&&failed.length ? el("details",{class:"failed-renders"},[el("summary",{},`${failed.length} earlier failed render versions`),el("button",{class:"select-all",onclick:()=>{const allFailedSelected=failed.every(item=>state.selectedRenders.has(item.id));failed.forEach(item=>allFailedSelected?state.selectedRenders.delete(item.id):state.selectedRenders.add(item.id));state.cleanupPlan=null;render(state.lastStatus);}},failed.every(item=>state.selectedRenders.has(item.id))?"Clear failed selection":"Select failed renders"),...failed.map(item=>el("div",{class:`failed-render-row ${state.selectedRenders.has(item.id)?"selected-for-cleanup":""}`},[selectionCheckbox("render",item.id,`Select failed render ${item.title} version ${item.version}`),el("p",{},`v${item.version} · ${item.title} · ${formatBytes(item.size_bytes)} · ${item.error||"failed"}`)]))]) : "",
   ]);
 }
 
@@ -263,7 +342,7 @@ function clipCard(item, mode = "editor") {
   const statusText = receipt?.summary || (taskStatus && taskStatus !== "prepared" ? `Hermes task ${item.publisher_task_id || ""} · ${taskStatus}` : "Hermes will use the signed-in TikTok and YouTube accounts.");
   const locked = tracked || active || finished || published;
   const roleAction = mode === "publisher" ? el("button",{class:"publisher",onclick:()=>sendToHermesPublisher(item).catch(error=>{showNotice("");showError(error.message);}),...(locked?{disabled:"true"}:{})},publisherLabel) : el("button",{class:"publisher",onclick:()=>{state.activeTab="publisher";state.activityCandidate=item.candidate_id;render(state.lastStatus);}},"Open in Publisher");
-  return el("article",{class:`clip-card ${state.preview?.id===item.id?"selected":""}`},[el("div",{class:"clip-card-top"},[el("span",{class:"version"},`v${item.version}`),el("span",{class:`ready-dot ${published?"published":""}`},published?"published":active?"Hermes working":"ready")]),el("h4",{},item.title),el("p",{class:"clip-meta"},`${formatDuration(item.duration)} · ${formatBytes(item.size_bytes)} · ${item.start_seconds.toFixed(1)}–${item.end_seconds.toFixed(1)}s`),el("p",{class:"publisher-status"},statusText),el("div",{class:"actions clip-actions"},[el("button",{onclick:()=>previewClip(item).catch(error=>showError(error.message))},"Preview"),el("button",{class:"secondary",onclick:()=>saveClip(item).catch(error=>showError(error.message))},"Save MP4"),roleAction,el("button",{class:"ghost",onclick:()=>{state.activityCandidate=item.candidate_id;render(state.lastStatus);}},"Activity")])]);
+  return el("article",{class:`clip-card ${state.preview?.id===item.id?"selected":""} ${state.selectedRenders.has(item.id)?"selected-for-cleanup":""}`},[selectionCheckbox("render",item.id,`Select render ${item.title} version ${item.version}`),el("div",{class:"clip-card-top"},[el("span",{class:"version"},`v${item.version}`),el("span",{class:`ready-dot ${published?"published":""}`},published?"published":active?"Hermes working":"ready")]),el("h4",{},item.title),el("p",{class:"clip-meta"},`${formatDuration(item.duration)} · ${formatBytes(item.size_bytes)} · ${item.start_seconds.toFixed(1)}–${item.end_seconds.toFixed(1)}s`),el("p",{class:"publisher-status"},statusText),el("div",{class:"actions clip-actions"},[el("button",{onclick:()=>previewClip(item).catch(error=>showError(error.message))},"Preview"),el("button",{class:"secondary",onclick:()=>saveClip(item).catch(error=>showError(error.message))},"Save MP4"),roleAction,el("button",{class:"ghost",onclick:()=>{state.activityCandidate=item.candidate_id;render(state.lastStatus);}},"Activity")])]);
 }
 
 function transcriptPanel(words) {

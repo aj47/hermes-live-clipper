@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .cleanup import CleanupManager
 from .config import Settings
 from .database import Database
 from .models import CandidateState, JobState
@@ -54,8 +55,8 @@ class LiveClipperService:
 
     def delete_job(self, job_id: str) -> None:
         self.db.job(job_id)
-        shutil.rmtree(self.settings.root / "jobs" / job_id, ignore_errors=True)
-        self.db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+        preview = self.cleanup_preview([job_id], [], [])
+        self.cleanup_execute([job_id], [], [], preview["reclaimable_bytes"])
 
     def update_candidate(
         self, candidate_id: str, start_word_id: int, end_word_id: int
@@ -113,6 +114,39 @@ class LiveClipperService:
             message,
         )
         return self.db.candidate(candidate_id)
+
+    def cleanup_preview(
+        self,
+        job_ids: list[str],
+        candidate_ids: list[str],
+        render_ids: list[str],
+        force_publisher_assets: bool = False,
+    ) -> dict[str, Any]:
+        manager = CleanupManager(self.settings, self.db)
+        return manager.public_plan(
+            manager.plan(
+                job_ids,
+                candidate_ids,
+                render_ids,
+                force_publisher_assets=force_publisher_assets,
+            )
+        )
+
+    def cleanup_execute(
+        self,
+        job_ids: list[str],
+        candidate_ids: list[str],
+        render_ids: list[str],
+        expected_bytes: int,
+        force_publisher_assets: bool = False,
+    ) -> dict[str, Any]:
+        return CleanupManager(self.settings, self.db).execute(
+            job_ids,
+            candidate_ids,
+            render_ids,
+            expected_bytes,
+            force_publisher_assets=force_publisher_assets,
+        )
 
     def status(self) -> dict[str, Any]:
         jobs = self.db.jobs()

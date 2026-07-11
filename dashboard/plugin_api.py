@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from hermes_live_clipper.cleanup import CleanupError
 from hermes_live_clipper.service import get_service
 
 router = APIRouter()
@@ -27,6 +28,17 @@ class ActionRequest(BaseModel):
 
 class HandoffCompleteRequest(BaseModel):
     task_id: str | None = None
+
+
+class CleanupRequest(BaseModel):
+    job_ids: list[str] = Field(default_factory=list, max_length=500)
+    candidate_ids: list[str] = Field(default_factory=list, max_length=500)
+    render_ids: list[str] = Field(default_factory=list, max_length=500)
+    force_publisher_assets: bool = False
+
+
+class CleanupExecuteRequest(CleanupRequest):
+    expected_bytes: int = Field(ge=0)
 
 
 def _not_found(exc: KeyError) -> HTTPException:
@@ -68,6 +80,8 @@ def delete(job_id: str):
         get_service().delete_job(job_id)
     except KeyError as exc:
         raise _not_found(exc) from exc
+    except CleanupError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.put("/candidates/{candidate_id}/trim")
@@ -123,3 +137,30 @@ def complete_publisher_handoff(render_id: str, request: HandoffCompleteRequest):
         return get_service().complete_publisher_handoff(render_id, request.task_id)
     except KeyError as exc:
         raise _not_found(exc) from exc
+
+
+@router.post("/cleanup/preview")
+def cleanup_preview(request: CleanupRequest):
+    try:
+        return get_service().cleanup_preview(
+            request.job_ids,
+            request.candidate_ids,
+            request.render_ids,
+            request.force_publisher_assets,
+        )
+    except CleanupError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/cleanup/execute")
+def cleanup_execute(request: CleanupExecuteRequest):
+    try:
+        return get_service().cleanup_execute(
+            request.job_ids,
+            request.candidate_ids,
+            request.render_ids,
+            request.expected_bytes,
+            request.force_publisher_assets,
+        )
+    except CleanupError as exc:
+        raise HTTPException(409, str(exc)) from exc

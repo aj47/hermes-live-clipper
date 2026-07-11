@@ -118,3 +118,35 @@ def test_publisher_handoff_preserves_render_and_tracks_queue(monkeypatch, servic
     detail = client.get(f"/jobs/{job['id']}").json()
     assert detail["renders"][0]["publisher_result"]["status"] == "published"
     assert detail["renders"][0]["publisher_result"]["summary"] == "Both verified"
+
+
+def test_cleanup_preview_and_execute_routes(monkeypatch, service):
+    job = service.add_job("https://twitch.tv/example_streamer")
+    service.stop_job(job["id"])
+    client = load_router(monkeypatch, service)
+    selection = {"job_ids": [job["id"]], "candidate_ids": [], "render_ids": []}
+
+    preview = client.post("/cleanup/preview", json=selection)
+    assert preview.status_code == 200
+    assert preview.json()["counts"]["jobs"] == 1
+    assert preview.json()["blocked"] == []
+
+    execute = client.post(
+        "/cleanup/execute",
+        json={**selection, "expected_bytes": preview.json()["reclaimable_bytes"]},
+    )
+    assert execute.status_code == 200
+    assert service.db.execute("SELECT COUNT(*) value FROM jobs").fetchone()["value"] == 0
+
+
+def test_cleanup_execute_blocks_active_stream(monkeypatch, service):
+    job = service.add_job("https://twitch.tv/example_streamer")
+    client = load_router(monkeypatch, service)
+    selection = {"job_ids": [job["id"]], "candidate_ids": [], "render_ids": []}
+    preview = client.post("/cleanup/preview", json=selection).json()
+    response = client.post(
+        "/cleanup/execute",
+        json={**selection, "expected_bytes": preview["reclaimable_bytes"]},
+    )
+    assert response.status_code == 409
+    assert "Stop this stream" in response.json()["detail"]
