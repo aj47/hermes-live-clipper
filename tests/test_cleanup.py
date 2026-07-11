@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_live_clipper.cleanup import CleanupError
+from hermes_live_clipper.cleanup import CleanupError, CleanupManager
 
 
 def add_ready_render(service, job_id: str, candidate_id: str, render_id: str) -> Path:
@@ -56,6 +56,11 @@ def test_cleanup_blocks_active_job(service):
     assert preview["blocked"][0]["kind"] == "active_job"
     with pytest.raises(CleanupError, match="Stop this stream"):
         service.cleanup_execute([job["id"]], [], [], preview["reclaimable_bytes"])
+
+
+def test_cleanup_rejects_unapproved_sql_target(service):
+    with pytest.raises(CleanupError, match="Unsupported cleanup target"):
+        CleanupManager._delete_ids(service.db.connection(), "jobs", "source_url", {"job-id"})
 
 
 def test_cleanup_requires_explicit_force_for_publisher_assets(service):
