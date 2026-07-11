@@ -77,16 +77,34 @@ def test_publisher_handoff_preserves_render_and_tracks_queue(monkeypatch, servic
     outbox = Path(handoff["outbox_path"])
     assert outbox.read_bytes() == b"fake-mp4"
     assert outbox.parent.joinpath("handoff.json").exists()
-    assert handoff["payload"]["decision"] == "continue"
-    assert handoff["payload"]["asset"]["video"] == str(outbox)
-    assert "does not" not in handoff["payload"]["record"]["note"].lower()
-    assert "do not mark it uploaded or published" in handoff["payload"]["record"]["note"]
+    task = handoff["task"]
+    assert task["assignee"] == "default"
+    assert task["idempotency_key"] == "live-clipper-publisher:render-publisher"
+    assert task["skills"] == ["youtube-upload"]
+    assert str(outbox) in task["body"]
+    assert "signed-in local TikTok and YouTube accounts" in task["body"]
+    assert "Set status=published only when both" in task["body"]
 
     completed = client.post(
         "/renders/render-publisher/publisher-handoff/complete",
-        json={"task_id": "alex-task-123"},
+        json={"task_id": "hermes-task-123"},
     )
     assert completed.status_code == 200
     detail = client.get(f"/jobs/{job['id']}").json()
     assert detail["renders"][0]["publisher_status"] == "queued"
-    assert detail["renders"][0]["publisher_task_id"] == "alex-task-123"
+    assert detail["renders"][0]["publisher_task_id"] == "hermes-task-123"
+
+    outbox.parent.joinpath("publisher-result.json").write_text(
+        '{"status":"published","summary":"Unverified","platforms":[]}'
+    )
+    detail = client.get(f"/jobs/{job['id']}").json()
+    assert detail["renders"][0]["publisher_result"]["status"] == "invalid"
+
+    outbox.parent.joinpath("publisher-result.json").write_text(
+        '{"status":"published","summary":"Both verified","platforms":['
+        '{"platform":"youtube","status":"published","receipt":"yt-123"},'
+        '{"platform":"tiktok","status":"published","receipt":"tt-123"}]}'
+    )
+    detail = client.get(f"/jobs/{job['id']}").json()
+    assert detail["renders"][0]["publisher_result"]["status"] == "published"
+    assert detail["renders"][0]["publisher_result"]["summary"] == "Both verified"

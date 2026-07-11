@@ -127,8 +127,43 @@ class LiveClipperService:
             item = dict(row)
             path = Path(item.pop("path"))
             item["size_bytes"] = path.stat().st_size if path.exists() else None
+            result_path = (
+                self.settings.root / "publisher_outbox" / item["id"] / "publisher-result.json"
+            )
+            item["publisher_result"] = self._read_publisher_result(result_path)
             renders.append(item)
         return renders
+
+    @staticmethod
+    def _read_publisher_result(path: Path) -> dict[str, Any] | None:
+        if not path.is_file():
+            return None
+        try:
+            result = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {"status": "invalid", "summary": "Publisher result could not be read"}
+        if not isinstance(result, dict):
+            return {"status": "invalid", "summary": "Publisher result is malformed"}
+        allowed = {"published", "partial", "blocked", "upload_ready", "failed"}
+        if result.get("status") not in allowed:
+            return {"status": "invalid", "summary": "Publisher result has an unknown status"}
+        if result["status"] == "published":
+            platforms = result.get("platforms")
+            if not isinstance(platforms, list):
+                return {"status": "invalid", "summary": "Published result has no receipts"}
+            receipts = {
+                entry.get("platform"): entry
+                for entry in platforms
+                if isinstance(entry, dict)
+                and entry.get("status") == "published"
+                and (entry.get("url") or entry.get("receipt"))
+            }
+            if not {"youtube", "tiktok"}.issubset(receipts):
+                return {
+                    "status": "invalid",
+                    "summary": "Published result is missing a TikTok or YouTube receipt",
+                }
+        return result
 
     def prepare_publisher_handoff(self, render_id: str) -> dict[str, Any]:
         row = self.db.execute(
@@ -157,20 +192,9 @@ class LiveClipperService:
                 os.replace(temporary, clip_path)
 
             now = datetime.now(UTC).isoformat()
-            asset_id = f"live-clipper-{render_id}"
-            summary = (
-                f"Live Clipper draft from {item['provider']}; "
-                f"{float(item['start_seconds']):.1f}-{float(item['end_seconds']):.1f}s, "
-                f"confidence {float(item['confidence']):.0%}."
-            )
-            note = (
-                "Live Clipper editor/publisher handoff. "
-                f"Use the preserved source MP4 at {clip_path}. "
-                "This queues editorial work only; do not mark it uploaded or published "
-                "without an actual platform receipt."
-            )
+            result_path = outbox / "publisher-result.json"
             metadata = {
-                "asset_id": asset_id,
+                "asset_id": f"live-clipper-{render_id}",
                 "render_id": render_id,
                 "job_id": item["job_id"],
                 "title": item["title"],
@@ -190,35 +214,45 @@ class LiveClipperService:
                 (render_id, str(clip_path)),
             )
 
+        task_body = f"""Publish this specific Live Clipper render to the signed-in local TikTok and YouTube accounts.
+
+This task was created only after the user confirmed a dashboard warning that the Hermes publisher may upload and publish this MP4 to both platforms.
+
+Immutable source MP4: {clip_path}
+Handoff metadata: {outbox / "handoff.json"}
+Publisher result file: {result_path}
+Render id: {render_id}
+Source URL: {item["canonical_url"]}
+Suggested title: {item["title"]}
+
+Execution requirements:
+1. Inspect the MP4 with ffprobe before uploading. Use it as-is; do not crop or overwrite it.
+2. Create concise platform-appropriate titles/descriptions. Do not invent claims beyond the clip.
+3. For YouTube, use the installed youtube-upload workflow when configured. Verify the resulting video ID, URL, and visibility.
+4. For TikTok, use browser/computer-use with the already signed-in local Chrome account. Stop as blocked if login, 2FA, account selection, or a final human decision is required.
+5. Never claim success from an upload attempt or process exit alone. Verify each real platform receipt.
+6. Do not expose credentials, cookies, or temporary upload tokens in logs or artifacts.
+7. Atomically write {result_path} as JSON before completing. Use a temporary sibling file and rename it. Schema:
+   {{"status":"published|partial|blocked|upload_ready|failed","summary":"...","platforms":[{{"platform":"youtube|tiktok","status":"published|blocked|failed","url":"verified public or studio URL when available","receipt":"video/post id or concise verification"}}],"completed_at":"ISO-8601"}}
+8. Set status=published only when both YouTube and TikTok have verified receipts. Use partial when exactly one succeeded.
+
+Final response must repeat the truthful status, receipts, and any action the user must take."""
+
         return {
             "render_id": render_id,
             "outbox_path": str(clip_path),
-            "payload": {
-                "assetId": asset_id,
-                "decision": "continue",
-                "asset": {
-                    "id": asset_id,
-                    "title": item["title"],
-                    "type": "shortform",
-                    "status": "local MP4 ready for editor/publisher handoff",
-                    "risk": "unknown",
-                    "summary": summary,
-                    "video": str(clip_path),
-                    "localPath": str(clip_path),
-                    "renderId": render_id,
-                    "sourceUrl": item["canonical_url"],
-                    "next": [
-                        f"Use the local MP4 at {clip_path} as the source artifact.",
-                        "Edit and package it for the appropriate channel.",
-                        "Do not claim publication until an actual platform receipt exists.",
-                    ],
-                },
-                "record": {
-                    "decision": "continue",
-                    "note": note,
-                    "updatedAt": now,
-                    "checks": {},
-                },
+            "task": {
+                "title": f"Publish Live Clipper render: {item['title']}",
+                "body": task_body,
+                "assignee": "default",
+                "workspace_kind": "scratch",
+                "tenant": "live-clipper",
+                "priority": 100,
+                "idempotency_key": f"live-clipper-publisher:{render_id}",
+                "max_runtime_seconds": 3600,
+                "skills": ["youtube-upload"],
+                "goal_mode": True,
+                "goal_max_turns": 12,
             },
         }
 

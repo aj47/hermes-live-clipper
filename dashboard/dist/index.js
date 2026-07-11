@@ -9,7 +9,8 @@
   const h = React.createElement;
   const { useEffect } = SDK.hooks;
   const api = "/api/plugins/hermes-live-clipper";
-const state = { selected: null, detail: null, activeTab: "suggestions", preview: null, lastStatus: null, notice: "" };
+const state = { selected: null, detail: null, activeTab: "suggestions", preview: null, lastStatus: null, notice: "", publisherTasks: {} };
+const publisherBoard = "live-clipper-publishing";
 
 const el = (tag, props = {}, children = []) => {
   const node = document.createElement(tag);
@@ -22,6 +23,24 @@ async function request(path, options = {}) {
   const response = await authedFetch(api + path, {headers: {"Content-Type":"application/json"}, ...options});
   if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `Request failed (${response.status})`);
   return response.status === 204 ? null : response.json();
+}
+
+async function kanbanRequest(path, options = {}) {
+  const response = await authedFetch(`/api/plugins/kanban${path}`, {headers:{"Content-Type":"application/json"}, ...options});
+  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `Hermes task request failed (${response.status})`);
+  return response.status === 204 ? null : response.json();
+}
+
+async function loadPublisherTasks(renders = []) {
+  const tracked = renders.filter(item => item.publisher_task_id);
+  await Promise.all(tracked.map(async item => {
+    try {
+      const result = await kanbanRequest(`/tasks/${encodeURIComponent(item.publisher_task_id)}?board=${encodeURIComponent(publisherBoard)}`);
+      state.publisherTasks[item.id] = result.task || result;
+    } catch (error) {
+      state.publisherTasks[item.id] = {status:"unavailable", error:error.message};
+    }
+  }));
 }
 
 function formatBytes(bytes) {
@@ -44,7 +63,10 @@ async function refresh({ passive = false } = {}) {
     const playback = currentPlayer ? { time: currentPlayer.currentTime, paused: currentPlayer.paused } : null;
     const status = await request("/status");
     if (!state.selected && status.jobs.length) state.selected = status.jobs[0].id;
-    if (state.selected) state.detail = await request(`/jobs/${state.selected}`);
+    if (state.selected) {
+      state.detail = await request(`/jobs/${state.selected}`);
+      await loadPublisherTasks(state.detail.renders);
+    }
     render(status);
     const nextPlayer = document.querySelector(".clip-player video");
     if (playback && nextPlayer) {
@@ -138,24 +160,17 @@ async function saveClip(renderItem) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-async function sendToPublisher(renderItem) {
-  if (!window.confirm(`Queue “${renderItem.title}” for the editor/publisher? This preserves the MP4 and creates an editorial task; it does not publish automatically.`)) return;
+async function sendToHermesPublisher(renderItem) {
+  if (!window.confirm(`Start a Hermes publishing agent for “${renderItem.title}”? It may upload and publish this MP4 to the signed-in TikTok and YouTube accounts.`)) return;
   showError("");
-  showNotice("Preparing a durable editor/publisher handoff…");
+  showNotice("Preserving the MP4 and starting a Hermes publisher…");
   const handoff = await request(`/renders/${renderItem.id}/publisher-handoff`, {method:"POST"});
-  const response = await authedFetch("/api/plugins/techfren-review/qa-decision", {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify(handoff.payload),
-  });
-  if (!response.ok) {
-    const problem = await response.json().catch(() => ({}));
-    throw new Error(problem.detail || `Editor/publisher queue failed (${response.status})`);
-  }
-  const result = response.status === 204 ? {} : await response.json().catch(() => ({}));
-  const taskId = result.taskId || result.task_id || result.id || null;
+  const result = await kanbanRequest(`/tasks?board=${encodeURIComponent(publisherBoard)}`, {method:"POST", body:JSON.stringify(handoff.task)});
+  const task = result.task || result;
+  const taskId = task.id || task.task_id || result.taskId || null;
+  if (!taskId) throw new Error("Hermes created a publisher task without returning its task ID");
   await request(`/renders/${renderItem.id}/publisher-handoff/complete`, {method:"POST", body:JSON.stringify({task_id:taskId})});
-  showNotice(taskId ? `Queued for the editor/publisher as task ${taskId}. It has not been published yet.` : "Queued for the editor/publisher. It has not been published yet.");
+  showNotice(`Hermes publisher task ${taskId} is queued on this Mac. Publication will only be shown after verified platform receipts.`);
   await refresh();
 }
 
@@ -174,9 +189,17 @@ function clipsPanel(renders) {
 }
 
 function clipCard(item) {
-  const sent = item.publisher_status === "queued";
-  const publisherLabel = sent ? "Sent to publisher" : item.publisher_status === "prepared" ? "Retry publisher queue" : "Send to editor/publisher";
-  return el("article",{class:`clip-card ${state.preview?.id===item.id?"selected":""}`},[el("div",{class:"clip-card-top"},[el("span",{class:"version"},`v${item.version}`),el("span",{class:"ready-dot"},sent?"publisher queued":"ready")]),el("h4",{},item.title),el("p",{class:"clip-meta"},`${formatDuration(item.duration)} · ${formatBytes(item.size_bytes)} · ${item.start_seconds.toFixed(1)}–${item.end_seconds.toFixed(1)}s`),el("div",{class:"actions clip-actions"},[el("button",{onclick:()=>previewClip(item).catch(error=>showError(error.message))},"Preview"),el("button",{class:"secondary",onclick:()=>saveClip(item).catch(error=>showError(error.message))},"Save MP4"),el("button",{class:"publisher",onclick:()=>sendToPublisher(item).catch(error=>{showNotice("");showError(error.message);}),...(sent?{disabled:"true"}:{})},publisherLabel)])]);
+  const task = state.publisherTasks[item.id];
+  const receipt = item.publisher_result;
+  const taskStatus = task?.status || (item.publisher_status === "queued" ? "queued" : item.publisher_status);
+  const published = receipt?.status === "published";
+  const active = ["queued","ready","pending","waiting","running","claimed","in_progress"].includes(taskStatus);
+  const finished = ["completed","done","blocked","failed","timed_out","gave_up"].includes(taskStatus) || Boolean(receipt);
+  const tracked = Boolean(item.publisher_task_id);
+  const publisherLabel = published ? "Published to TikTok + YouTube" : active ? `Hermes ${taskStatus}…` : taskStatus === "unavailable" ? "Hermes status unavailable" : finished ? `Hermes ${receipt?.status || taskStatus}` : item.publisher_status === "prepared" ? "Retry Hermes publisher" : "Publish with Hermes";
+  const statusText = receipt?.summary || (taskStatus && taskStatus !== "prepared" ? `Hermes task ${item.publisher_task_id || ""} · ${taskStatus}` : "Hermes will use the signed-in TikTok and YouTube accounts.");
+  const locked = tracked || active || finished || published;
+  return el("article",{class:`clip-card ${state.preview?.id===item.id?"selected":""}`},[el("div",{class:"clip-card-top"},[el("span",{class:"version"},`v${item.version}`),el("span",{class:`ready-dot ${published?"published":""}`},published?"published":active?"Hermes working":"ready")]),el("h4",{},item.title),el("p",{class:"clip-meta"},`${formatDuration(item.duration)} · ${formatBytes(item.size_bytes)} · ${item.start_seconds.toFixed(1)}–${item.end_seconds.toFixed(1)}s`),el("p",{class:"publisher-status"},statusText),el("div",{class:"actions clip-actions"},[el("button",{onclick:()=>previewClip(item).catch(error=>showError(error.message))},"Preview"),el("button",{class:"secondary",onclick:()=>saveClip(item).catch(error=>showError(error.message))},"Save MP4"),el("button",{class:"publisher",onclick:()=>sendToHermesPublisher(item).catch(error=>{showNotice("");showError(error.message);}),...(locked?{disabled:"true"}:{})},publisherLabel)])]);
 }
 
 function transcriptPanel(words) {
