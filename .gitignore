@@ -9,6 +9,9 @@ outputs/
 text_/
 build/
 dist/
+!dashboard/dist/
+!dashboard/dist/*.js
+!dashboard/dist/*.css
 *.egg-info/
 .env
 .env.*
