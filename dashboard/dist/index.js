@@ -375,7 +375,7 @@ async function sendToHermesPublisher(renderItem) {
   const currentStatus = currentTask?.status || renderItem.publisher_status;
   const retryTaskId = renderItem.publisher_task_id && ["blocked","failed","timed_out","gave_up"].includes(currentStatus) ? renderItem.publisher_task_id : null;
   const action = retryTaskId ? "Retry" : "Start";
-  if (!window.confirm(`${action} a Hermes publishing agent for “${renderItem.title}”? It may upload and publish this MP4 through the signed-in TikTok and YouTube accounts in Herman’s existing Chrome session.`)) return;
+  if (!window.confirm(`${action} a Hermes publishing agent for “${renderItem.title}”? It may upload and publish this MP4 through the signed-in TikTok and YouTube accounts in this Mac’s existing Chrome session.`)) return;
   showError("");
   showNotice("Preparing the Hermes publishing desk…");
   await kanbanRequest("/boards", {method:"POST",body:JSON.stringify({slug:publisherBoard,name:"Live Clipper Publishing",description:"Durable publishing tasks created by the Live Clipper dashboard.",icon:"send",color:"#f6bd75",switch:false})});
