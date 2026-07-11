@@ -1,0 +1,12 @@
+{
+  "name": "live-clipper-v2",
+  "label": "Live Clipper",
+  "description": "Monitor, transcribe, review, and render public livestream clips",
+  "icon": "Scissors",
+  "version": "0.1.0",
+  "tab": {"path": "/live-clipper-v2", "position": "after:skills"},
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}
+

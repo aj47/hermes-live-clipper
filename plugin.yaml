@@ -1,0 +1,4 @@
+name: hermes-live-clipper
+version: "0.1.0"
+description: Monitor public YouTube and Twitch streams, transcribe locally, and render clip drafts.
+
