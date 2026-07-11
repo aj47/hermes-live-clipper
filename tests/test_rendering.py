@@ -36,3 +36,24 @@ def test_chunk_render_converts_global_times_to_local_ranges(tmp_path, monkeypatc
     rendering.render_clip_from_chunks(chunks, destination, 45, 55)
     assert calls == [("0001.ts", 5, 10), ("0002.ts", 0, 5)]
     assert destination.read_bytes() == b"joined"
+
+
+def test_render_uses_accurate_output_seek_for_chunk_tails(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_run(command, **_kwargs):
+        captured["command"] = command
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(rendering.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        rendering,
+        "probe",
+        lambda _path: {
+            "streams": [{"codec_type": "video"}, {"codec_type": "audio"}],
+            "format": {"duration": "1.7"},
+        },
+    )
+    rendering.render_clip(tmp_path / "chunk.ts", tmp_path / "tail.mp4", 42.3, 44)
+    command = captured["command"]
+    assert command.index("-i") < command.index("-ss")
