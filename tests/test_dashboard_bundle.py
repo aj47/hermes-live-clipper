@@ -39,6 +39,10 @@ def test_dashboard_bundle_registers_with_host_and_uses_authenticated_fetch():
     assert "/messages?limit=500" in bundle
     assert "Open Hermes session" in bundle
     assert "Open published post" in bundle
+    assert "publishedReceipts" in bundle
+    assert "publishedRenderForCandidate" in bundle
+    assert "Published stories stay pinned first" in bundle
+    assert 'publishedRender?"View published clip"' in bundle
     assert "Worker stdout / stderr" in bundle
     assert "redactLog" in bundle
     assert "Review deletion" in bundle

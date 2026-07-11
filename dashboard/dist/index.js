@@ -100,6 +100,21 @@ function verifiedLink(value) {
   catch { return null; }
 }
 
+function publishedReceipts(renderItem) {
+  const platforms = Array.isArray(renderItem?.publisher_result?.platforms) ? renderItem.publisher_result.platforms : [];
+  return platforms.filter(item => item?.status === "published" && verifiedLink(item.url));
+}
+
+function hasPublishedReceipt(renderItem) {
+  return publishedReceipts(renderItem).length > 0;
+}
+
+function publishedRenderForCandidate(candidateId) {
+  return [...(state.detail?.renders || [])]
+    .filter(item => item.candidate_id === candidateId && hasPublishedReceipt(item))
+    .sort((a,b) => b.version - a.version)[0] || null;
+}
+
 function oneSentence(value, fallback) {
   const text = String(value || fallback || "").replace(/\s+/g, " ").trim();
   const first = text.match(/^.*?[.!?](?:\s|$)/)?.[0]?.trim() || text;
@@ -258,7 +273,7 @@ function detailPanel() {
 function pipelineRail(candidates, renders, words) {
   const ready = renders.filter(item => item.state === "ready").length;
   const handedOff = renders.filter(item => item.publisher_status || item.publisher_result).length;
-  const published = renders.filter(item => item.publisher_result?.status === "published").length;
+  const published = renders.filter(hasPublishedReceipt).length;
   const stages = [
     {id:"analyst",number:"01",role:"Story Analyst",verb:"Finds the story",metric:`${candidates.length} moments`,copy:"Scores hooks, payoff, and standalone value."},
     {id:"editor",number:"02",role:"Video Editor",verb:"Builds the draft",metric:`${ready} renders`,copy:"Cuts and verifies source-aspect video."},
@@ -325,7 +340,8 @@ function publisherConsole(renderItem,telemetry) {
 
 function candidatePanel(candidates) {
   const allSelected = candidates.length>0 && candidates.every(item=>state.selectedCandidates.has(item.id));
-  return el("div", {class:"panel tab-panel role-panel analyst-panel"}, [el("div", {class:"section-title"}, [el("div",{},[el("p",{class:"role-kicker"},"STORY ANALYST · AGENT 01"),el("h3",{},"Editorial opportunities"),el("p",{class:"muted"},"Hermes reviews the rolling transcript, scores each hook, and explains why the moment can stand alone.")]),el("div",{class:"section-tools"},[el("button",{class:"select-all",...(candidates.length?{}:{disabled:"true"}),onclick:()=>{candidates.forEach(item=>allSelected?state.selectedCandidates.delete(item.id):state.selectedCandidates.add(item.id));state.cleanupPlan=null;render(state.lastStatus);}},allSelected?"Clear selection":"Select all"),el("span",{},`${candidates.length}`)])]), el("div",{class:"candidate-grid"},candidates.length?candidates.map(candidateCard):[el("p",{class:"muted"},"Suggestions begin after five minutes of transcribed speech.")])]);
+  const ordered = [...candidates].sort((a,b)=>Number(Boolean(publishedRenderForCandidate(b.id)))-Number(Boolean(publishedRenderForCandidate(a.id))));
+  return el("div", {class:"panel tab-panel role-panel analyst-panel"}, [el("div", {class:"section-title"}, [el("div",{},[el("p",{class:"role-kicker"},"STORY ANALYST · AGENT 01"),el("h3",{},"Editorial opportunities"),el("p",{class:"muted"},"Published stories stay pinned first; Hermes keeps scoring new hooks below them.")]),el("div",{class:"section-tools"},[el("button",{class:"select-all",...(candidates.length?{}:{disabled:"true"}),onclick:()=>{candidates.forEach(item=>allSelected?state.selectedCandidates.delete(item.id):state.selectedCandidates.add(item.id));state.cleanupPlan=null;render(state.lastStatus);}},allSelected?"Clear selection":"Select all"),el("span",{},`${candidates.length}`)])]), el("div",{class:"candidate-grid"},ordered.length?ordered.map(candidateCard):[el("p",{class:"muted"},"Suggestions begin after five minutes of transcribed speech.")])]);
 }
 
 function latestReadyRender(candidateId) {
@@ -346,9 +362,10 @@ function candidateCard(c) {
   const action = async name => { await request(`/candidates/${c.id}/action`, {method:"POST",body:JSON.stringify({action:name})}); refresh(); };
   const busy = c.state === "rendering" || c.state === "render_queued";
   const readyRender = latestReadyRender(c.id);
-  const primaryAction = readyRender ? el("button",{class:"view-render",onclick:()=>openRenderedClip(c.id).catch(error=>showError(error.message))},"View rendered clip") : el("button",{onclick:()=>action("render"),...(busy?{disabled:"true"}:{})},busy?"Rendering…":"Render clip");
+  const publishedRender = publishedRenderForCandidate(c.id);
+  const primaryAction = readyRender ? el("button",{class:"view-render",onclick:()=>openRenderedClip(c.id).catch(error=>showError(error.message))},publishedRender?"View published clip":"View rendered clip") : el("button",{onclick:()=>action("render"),...(busy?{disabled:"true"}:{})},busy?"Rendering…":"Render clip");
   const rationale = oneSentence(c.rationale, "Hermes ranked this as a strong standalone moment with a clear payoff.");
-  return el("article", {class:`candidate ${state.selectedCandidates.has(c.id)?"selected-for-cleanup":""}`}, [selectionCheckbox("candidate",c.id,`Select suggestion ${c.title}`),el("div",{class:"score","aria-label":`${Math.round(c.confidence*100)} out of 100 clip score`},[el("strong",{},`${Math.round(c.confidence*100)}`),el("span",{},"/ 100"),el("small",{},"CLIP SCORE")]),el("div",{class:"candidate-copy"},[el("h4",{},c.title),c.hook?el("p",{class:"candidate-hook"},c.hook):"",el("div",{class:"hook-rationale"},[el("span",{},"WHY IT HOOKS"),el("p",{},rationale)]),el("small",{class:"candidate-meta"},`${formatDuration(c.end_seconds-c.start_seconds)} · ${c.state.replaceAll("_"," ")}`),el("div",{class:"actions"},[primaryAction,el("button",{class:"secondary",onclick:()=>action("accept")},"Accept"),el("button",{class:"ghost",onclick:()=>action("reject")},"Reject"),el("button",{class:"ghost",onclick:()=>{state.activityCandidate=c.id;state.activityRender=null;render(state.lastStatus);}},"Activity")])])]);
+  return el("article", {class:`candidate ${publishedRender?"published-card":""} ${state.selectedCandidates.has(c.id)?"selected-for-cleanup":""}`}, [selectionCheckbox("candidate",c.id,`Select suggestion ${c.title}`),el("div",{class:"score","aria-label":`${Math.round(c.confidence*100)} out of 100 clip score`},[el("strong",{},`${Math.round(c.confidence*100)}`),el("span",{},"/ 100"),el("small",{},"CLIP SCORE")]),el("div",{class:"candidate-copy"},[publishedRender?el("div",{class:"published-banner"},[el("strong",{},"PUBLISHED"),receiptLinks(publishedRender.publisher_result)]):"",el("h4",{},c.title),c.hook?el("p",{class:"candidate-hook"},c.hook):"",el("div",{class:"hook-rationale"},[el("span",{},"WHY IT HOOKS"),el("p",{},rationale)]),el("small",{class:"candidate-meta"},`${formatDuration(c.end_seconds-c.start_seconds)} · ${c.state.replaceAll("_"," ")}`),el("div",{class:"actions"},[primaryAction,el("button",{class:"secondary",onclick:()=>action("accept")},"Accept"),el("button",{class:"ghost",onclick:()=>action("reject")},"Reject"),el("button",{class:"ghost",onclick:()=>{state.activityCandidate=c.id;state.activityRender=publishedRender?.id||null;render(state.lastStatus);}},publishedRender?"Publisher console":"Activity")])])]);
 }
 
 async function previewClip(renderItem) {
@@ -406,7 +423,7 @@ function clipsPanel(renders, mode = "editor") {
   const failed = renders.filter(item => item.state === "failed");
   const previewItem = ready.find(item => item.id === state.preview?.id);
   const publisherMode = mode === "publisher";
-  const ordered = publisherMode ? [...ready].sort((a,b)=>Number(Boolean(b.publisher_status))-Number(Boolean(a.publisher_status))||b.confidence-a.confidence) : ready;
+  const ordered = [...ready].sort((a,b)=>Number(hasPublishedReceipt(b))-Number(hasPublishedReceipt(a))||(publisherMode?Number(Boolean(b.publisher_status))-Number(Boolean(a.publisher_status))||b.confidence-a.confidence:0));
   const allSelected = ready.length>0 && ready.every(item=>state.selectedRenders.has(item.id));
   return el("div", {class:`tab-panel clips-view role-panel ${publisherMode?"publisher-panel":"editor-panel"}`}, [
     previewItem ? el("section",{class:"clip-player"},[el("div",{class:"player-copy"},[el("p",{class:"eyebrow"},`VERSION ${previewItem.version}`),el("h3",{},previewItem.title),el("p",{class:"muted"},`${formatDuration(previewItem.duration)} · ${Math.round(previewItem.confidence*100)} confidence`)]),el("video",{src:state.preview.url,controls:"true",preload:"metadata"})]) : "",
@@ -421,17 +438,18 @@ function clipCard(item, mode = "editor") {
   const task = state.publisherTasks[item.id];
   const receipt = item.publisher_result;
   const taskStatus = task?.status || (item.publisher_status === "queued" ? "queued" : item.publisher_status);
-  const published = receipt?.status === "published";
+  const fullyPublished = receipt?.status === "published";
+  const published = hasPublishedReceipt(item);
   const active = ["queued","ready","pending","waiting","running","claimed","in_progress"].includes(taskStatus);
   const finished = ["completed","done","blocked","failed","timed_out","gave_up"].includes(taskStatus) || Boolean(receipt);
   const tracked = Boolean(item.publisher_task_id);
-  const retryable = tracked && (["blocked","failed","timed_out","gave_up","triage"].includes(taskStatus) || ["blocked","failed"].includes(receipt?.status)) && !published;
-  const publisherLabel = published ? "Published to TikTok + YouTube" : active ? `Hermes ${taskStatus}…` : retryable ? "Retry with signed-in Chrome" : taskStatus === "unavailable" ? "Hermes status unavailable" : finished ? `Hermes ${receipt?.status || taskStatus}` : item.publisher_status === "prepared" ? "Retry Hermes publisher" : "Publish with Hermes";
+  const retryable = tracked && (["blocked","failed","timed_out","gave_up","triage"].includes(taskStatus) || ["blocked","failed"].includes(receipt?.status)) && !fullyPublished;
+  const publisherLabel = fullyPublished ? "Published to TikTok + YouTube" : active ? `Hermes ${taskStatus}…` : retryable ? "Retry with signed-in Chrome" : taskStatus === "unavailable" ? "Hermes status unavailable" : finished ? `Hermes ${receipt?.status || taskStatus}` : item.publisher_status === "prepared" ? "Retry Hermes publisher" : "Publish with Hermes";
   const statusText = receipt?.summary || item.publisher_progress?.message || (taskStatus && taskStatus !== "prepared" ? `Hermes task ${item.publisher_task_id || ""} · ${taskStatus}` : "Hermes will use the signed-in TikTok and YouTube accounts.");
-  const locked = active || published || (tracked && !retryable) || (finished && !retryable);
+  const locked = active || fullyPublished || (tracked && !retryable) || (finished && !retryable);
   const roleAction = mode === "publisher" ? el("button",{class:"publisher",onclick:()=>sendToHermesPublisher(item).catch(error=>{showNotice("");showError(error.message);}),...(locked?{disabled:"true"}:{})},publisherLabel) : el("button",{class:"publisher",onclick:()=>{state.activeTab="publisher";state.activityCandidate=item.candidate_id;state.activityRender=item.id;render(state.lastStatus);}},"Open in Publisher");
   const consoleLabel = mode === "publisher" && (tracked||item.publisher_progress) ? "Publisher console" : "Activity";
-  return el("article",{class:`clip-card ${state.preview?.id===item.id?"selected":""} ${state.selectedRenders.has(item.id)?"selected-for-cleanup":""}`},[selectionCheckbox("render",item.id,`Select render ${item.title} version ${item.version}`),el("div",{class:"clip-card-top"},[el("span",{class:"version"},`v${item.version}`),el("span",{class:`ready-dot ${published?"published":""}`},published?"published":active?"Hermes working":"ready")]),el("h4",{},item.title),el("p",{class:"clip-meta"},`${formatDuration(item.duration)} · ${formatBytes(item.size_bytes)} · ${item.start_seconds.toFixed(1)}–${item.end_seconds.toFixed(1)}s`),el("p",{class:"publisher-status"},statusText),mode==="publisher"?publisherMiniProgress(item):"",receiptLinks(receipt),el("div",{class:"actions clip-actions"},[el("button",{onclick:()=>previewClip(item).catch(error=>showError(error.message))},"Preview"),el("button",{class:"secondary",onclick:()=>saveClip(item).catch(error=>showError(error.message))},"Save MP4"),roleAction,el("button",{class:"ghost",onclick:()=>{state.activityCandidate=item.candidate_id;state.activityRender=mode==="publisher"?item.id:null;render(state.lastStatus);}},consoleLabel)])]);
+  return el("article",{class:`clip-card ${published?"published-card":""} ${state.preview?.id===item.id?"selected":""} ${state.selectedRenders.has(item.id)?"selected-for-cleanup":""}`},[selectionCheckbox("render",item.id,`Select render ${item.title} version ${item.version}`),el("div",{class:"clip-card-top"},[el("span",{class:"version"},`v${item.version}`),el("span",{class:`ready-dot ${published?"published":""}`},published?"published":active?"Hermes working":"ready")]),el("h4",{},item.title),el("p",{class:"clip-meta"},`${formatDuration(item.duration)} · ${formatBytes(item.size_bytes)} · ${item.start_seconds.toFixed(1)}–${item.end_seconds.toFixed(1)}s`),el("p",{class:"publisher-status"},statusText),mode==="publisher"?publisherMiniProgress(item):"",receiptLinks(receipt),el("div",{class:"actions clip-actions"},[el("button",{onclick:()=>previewClip(item).catch(error=>showError(error.message))},"Preview"),el("button",{class:"secondary",onclick:()=>saveClip(item).catch(error=>showError(error.message))},"Save MP4"),roleAction,el("button",{class:"ghost",onclick:()=>{state.activityCandidate=item.candidate_id;state.activityRender=published?item.id:mode==="publisher"?item.id:null;render(state.lastStatus);}},published?"Publisher console":consoleLabel)])]);
 }
 
 function publisherMiniProgress(item) {
