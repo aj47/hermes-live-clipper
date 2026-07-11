@@ -9,7 +9,7 @@
   const h = React.createElement;
   const { useEffect } = SDK.hooks;
   const api = "/api/plugins/hermes-live-clipper";
-const state = { selected: null, detail: null, activeTab: "suggestions", preview: null, lastStatus: null };
+const state = { selected: null, detail: null, activeTab: "suggestions", preview: null, lastStatus: null, notice: "" };
 
 const el = (tag, props = {}, children = []) => {
   const node = document.createElement(tag);
@@ -58,13 +58,18 @@ function showError(message) {
   document.querySelector("#hlc-error")?.replaceChildren(message);
 }
 
+function showNotice(message) {
+  state.notice = message;
+  document.querySelector("#hlc-notice")?.replaceChildren(message);
+}
+
 function render(status) {
   state.lastStatus = status;
   const root = document.querySelector("#hermes-live-clipper");
   if (!root) return;
   root.replaceChildren(
     el("header", {class:"hero"}, [el("div", {}, [el("p", {class:"eyebrow"}, "HERMES MEDIA WORKER"), el("h1", {}, "Live Clipper"), el("p", {class:"dek"}, "Turn a public livestream into transcript-grounded draft clips while it is still live.")]), resourcePills(status)]),
-    el("section", {class:"submit-card"}, [jobForm(), el("p", {class:"legal"}, "Only clip content you are authorized to use. Public availability does not grant redistribution rights."), el("p", {id:"hlc-error", class:"error"})]),
+    el("section", {class:"submit-card"}, [jobForm(), el("p", {class:"legal"}, "Only clip content you are authorized to use. Public availability does not grant redistribution rights."), el("p", {id:"hlc-notice", class:"success"}, state.notice), el("p", {id:"hlc-error", class:"error"})]),
     el("div", {class:"workspace"}, [jobList(status.jobs), detailPanel()])
   );
 }
@@ -133,6 +138,27 @@ async function saveClip(renderItem) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+async function sendToPublisher(renderItem) {
+  if (!window.confirm(`Queue “${renderItem.title}” for the editor/publisher? This preserves the MP4 and creates an editorial task; it does not publish automatically.`)) return;
+  showError("");
+  showNotice("Preparing a durable editor/publisher handoff…");
+  const handoff = await request(`/renders/${renderItem.id}/publisher-handoff`, {method:"POST"});
+  const response = await authedFetch("/api/plugins/techfren-review/qa-decision", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify(handoff.payload),
+  });
+  if (!response.ok) {
+    const problem = await response.json().catch(() => ({}));
+    throw new Error(problem.detail || `Editor/publisher queue failed (${response.status})`);
+  }
+  const result = response.status === 204 ? {} : await response.json().catch(() => ({}));
+  const taskId = result.taskId || result.task_id || result.id || null;
+  await request(`/renders/${renderItem.id}/publisher-handoff/complete`, {method:"POST", body:JSON.stringify({task_id:taskId})});
+  showNotice(taskId ? `Queued for the editor/publisher as task ${taskId}. It has not been published yet.` : "Queued for the editor/publisher. It has not been published yet.");
+  await refresh();
+}
+
 function clipsPanel(renders) {
   const ready = renders.filter(item => item.state === "ready");
   const inFlight = renders.filter(item => item.state === "rendering");
@@ -148,7 +174,9 @@ function clipsPanel(renders) {
 }
 
 function clipCard(item) {
-  return el("article",{class:`clip-card ${state.preview?.id===item.id?"selected":""}`},[el("div",{class:"clip-card-top"},[el("span",{class:"version"},`v${item.version}`),el("span",{class:"ready-dot"},"ready")]),el("h4",{},item.title),el("p",{class:"clip-meta"},`${formatDuration(item.duration)} · ${formatBytes(item.size_bytes)} · ${item.start_seconds.toFixed(1)}–${item.end_seconds.toFixed(1)}s`),el("div",{class:"actions"},[el("button",{onclick:()=>previewClip(item).catch(error=>showError(error.message))},"Preview"),el("button",{class:"secondary",onclick:()=>saveClip(item).catch(error=>showError(error.message))},"Save MP4")])]);
+  const sent = item.publisher_status === "queued";
+  const publisherLabel = sent ? "Sent to publisher" : item.publisher_status === "prepared" ? "Retry publisher queue" : "Send to editor/publisher";
+  return el("article",{class:`clip-card ${state.preview?.id===item.id?"selected":""}`},[el("div",{class:"clip-card-top"},[el("span",{class:"version"},`v${item.version}`),el("span",{class:"ready-dot"},sent?"publisher queued":"ready")]),el("h4",{},item.title),el("p",{class:"clip-meta"},`${formatDuration(item.duration)} · ${formatBytes(item.size_bytes)} · ${item.start_seconds.toFixed(1)}–${item.end_seconds.toFixed(1)}s`),el("div",{class:"actions clip-actions"},[el("button",{onclick:()=>previewClip(item).catch(error=>showError(error.message))},"Preview"),el("button",{class:"secondary",onclick:()=>saveClip(item).catch(error=>showError(error.message))},"Save MP4"),el("button",{class:"publisher",onclick:()=>sendToPublisher(item).catch(error=>{showNotice("");showError(error.message);}),...(sent?{disabled:"true"}:{})},publisherLabel)])]);
 }
 
 function transcriptPanel(words) {

@@ -31,5 +31,11 @@ class Settings:
         )
 
     def ensure(self) -> None:
-        for path in (self.root, self.root / "jobs", self.root / "logs", self.root / "run"):
+        for path in (
+            self.root,
+            self.root / "jobs",
+            self.root / "logs",
+            self.root / "run",
+            self.root / "publisher_outbox",
+        ):
             path.mkdir(parents=True, exist_ok=True)

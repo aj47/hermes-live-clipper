@@ -47,3 +47,46 @@ def test_job_detail_includes_generated_render_versions(monkeypatch, service):
     assert detail["renders"][0]["id"] == "render-v1"
     assert detail["renders"][0]["title"] == "Generated clip"
     assert detail["renders"][0]["candidate_state"] == "suggested"
+    assert detail["renders"][0]["publisher_status"] is None
+
+
+def test_publisher_handoff_preserves_render_and_tracks_queue(monkeypatch, service):
+    job = service.add_job("https://twitch.tv/example_streamer")
+    candidate_id = service.db.upsert_candidate(
+        job["id"],
+        {
+            "start_seconds": 20,
+            "end_seconds": 50,
+            "title": "Publisher-ready clip",
+            "confidence": 0.9,
+            "standalone_value": 0.8,
+        },
+    )
+    source = service.settings.root / "jobs" / job["id"] / "renders" / "clip.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"fake-mp4")
+    service.db.execute(
+        "INSERT INTO renders(id,candidate_id,version,path,duration,state) VALUES(?,?,?,?,?,?)",
+        ("render-publisher", candidate_id, 1, str(source), 30, "ready"),
+    )
+    client = load_router(monkeypatch, service)
+
+    prepared = client.post("/renders/render-publisher/publisher-handoff")
+    assert prepared.status_code == 200
+    handoff = prepared.json()
+    outbox = Path(handoff["outbox_path"])
+    assert outbox.read_bytes() == b"fake-mp4"
+    assert outbox.parent.joinpath("handoff.json").exists()
+    assert handoff["payload"]["decision"] == "continue"
+    assert handoff["payload"]["asset"]["video"] == str(outbox)
+    assert "does not" not in handoff["payload"]["record"]["note"].lower()
+    assert "do not mark it uploaded or published" in handoff["payload"]["record"]["note"]
+
+    completed = client.post(
+        "/renders/render-publisher/publisher-handoff/complete",
+        json={"task_id": "alex-task-123"},
+    )
+    assert completed.status_code == 200
+    detail = client.get(f"/jobs/{job['id']}").json()
+    assert detail["renders"][0]["publisher_status"] == "queued"
+    assert detail["renders"][0]["publisher_task_id"] == "alex-task-123"

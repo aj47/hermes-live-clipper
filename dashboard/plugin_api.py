@@ -25,6 +25,10 @@ class ActionRequest(BaseModel):
     action: str
 
 
+class HandoffCompleteRequest(BaseModel):
+    task_id: str | None = None
+
+
 def _not_found(exc: KeyError) -> HTTPException:
     return HTTPException(404, f"Unknown resource: {exc.args[0]}")
 
@@ -101,3 +105,21 @@ def render_media(render_id: str):
     if root not in path.parents or not path.exists():
         raise HTTPException(404, "Render file not found")
     return FileResponse(path, media_type="video/mp4", filename=path.name)
+
+
+@router.post("/renders/{render_id}/publisher-handoff")
+def prepare_publisher_handoff(render_id: str):
+    try:
+        return get_service().prepare_publisher_handoff(render_id)
+    except KeyError as exc:
+        raise _not_found(exc) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/renders/{render_id}/publisher-handoff/complete")
+def complete_publisher_handoff(render_id: str, request: HandoffCompleteRequest):
+    try:
+        return get_service().complete_publisher_handoff(render_id, request.task_id)
+    except KeyError as exc:
+        raise _not_found(exc) from exc

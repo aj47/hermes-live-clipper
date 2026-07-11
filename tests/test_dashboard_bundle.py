@@ -10,3 +10,6 @@ def test_dashboard_bundle_registers_with_host_and_uses_authenticated_fetch():
     assert "previewClip" in bundle
     assert "saveClip" in bundle
     assert "passive && currentPlayer && !currentPlayer.paused" in bundle
+    assert "sendToPublisher" in bundle
+    assert 'authedFetch("/api/plugins/techfren-review/qa-decision"' in bundle
+    assert "it does not publish automatically" in bundle

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -113,7 +116,9 @@ class LiveClipperService:
     def renders(self, job_id: str) -> list[dict[str, Any]]:
         rows = self.db.execute(
             "SELECT r.*,c.job_id,c.title,c.start_seconds,c.end_seconds,c.confidence,"
-            "c.state candidate_state FROM renders r JOIN candidates c ON c.id=r.candidate_id "
+            "c.state candidate_state,h.status publisher_status,h.task_id publisher_task_id "
+            "FROM renders r JOIN candidates c ON c.id=r.candidate_id "
+            "LEFT JOIN publisher_handoffs h ON h.render_id=r.id "
             "WHERE c.job_id=? ORDER BY r.created_at DESC,r.version DESC",
             (job_id,),
         ).fetchall()
@@ -124,6 +129,113 @@ class LiveClipperService:
             item["size_bytes"] = path.stat().st_size if path.exists() else None
             renders.append(item)
         return renders
+
+    def prepare_publisher_handoff(self, render_id: str) -> dict[str, Any]:
+        row = self.db.execute(
+            "SELECT r.*,c.job_id,c.title,c.start_seconds,c.end_seconds,c.confidence,"
+            "j.canonical_url,j.provider FROM renders r "
+            "JOIN candidates c ON c.id=r.candidate_id JOIN jobs j ON j.id=c.job_id "
+            "WHERE r.id=? AND r.state='ready'",
+            (render_id,),
+        ).fetchone()
+        if not row:
+            raise KeyError(render_id)
+
+        item = dict(row)
+        source = Path(item["path"]).resolve()
+        root = self.settings.root.resolve()
+        if root not in source.parents or not source.is_file():
+            raise FileNotFoundError("Render file is missing")
+
+        with self._lock:
+            outbox = self.settings.root / "publisher_outbox" / render_id
+            outbox.mkdir(parents=True, exist_ok=True)
+            clip_path = outbox / "clip.mp4"
+            if not clip_path.exists() or clip_path.stat().st_size != source.stat().st_size:
+                temporary = outbox / ".clip.mp4.tmp"
+                shutil.copy2(source, temporary)
+                os.replace(temporary, clip_path)
+
+            now = datetime.now(UTC).isoformat()
+            asset_id = f"live-clipper-{render_id}"
+            summary = (
+                f"Live Clipper draft from {item['provider']}; "
+                f"{float(item['start_seconds']):.1f}-{float(item['end_seconds']):.1f}s, "
+                f"confidence {float(item['confidence']):.0%}."
+            )
+            note = (
+                "Live Clipper editor/publisher handoff. "
+                f"Use the preserved source MP4 at {clip_path}. "
+                "This queues editorial work only; do not mark it uploaded or published "
+                "without an actual platform receipt."
+            )
+            metadata = {
+                "asset_id": asset_id,
+                "render_id": render_id,
+                "job_id": item["job_id"],
+                "title": item["title"],
+                "version": item["version"],
+                "duration": item["duration"],
+                "source_url": item["canonical_url"],
+                "clip_path": str(clip_path),
+                "prepared_at": now,
+            }
+            metadata_tmp = outbox / ".handoff.json.tmp"
+            metadata_tmp.write_text(json.dumps(metadata, indent=2) + "\n")
+            os.replace(metadata_tmp, outbox / "handoff.json")
+            self.db.execute(
+                "INSERT INTO publisher_handoffs(render_id,outbox_path,status) VALUES(?,?,'prepared') "
+                "ON CONFLICT(render_id) DO UPDATE SET outbox_path=excluded.outbox_path,"
+                "updated_at=CURRENT_TIMESTAMP",
+                (render_id, str(clip_path)),
+            )
+
+        return {
+            "render_id": render_id,
+            "outbox_path": str(clip_path),
+            "payload": {
+                "assetId": asset_id,
+                "decision": "continue",
+                "asset": {
+                    "id": asset_id,
+                    "title": item["title"],
+                    "type": "shortform",
+                    "status": "local MP4 ready for editor/publisher handoff",
+                    "risk": "unknown",
+                    "summary": summary,
+                    "video": str(clip_path),
+                    "localPath": str(clip_path),
+                    "renderId": render_id,
+                    "sourceUrl": item["canonical_url"],
+                    "next": [
+                        f"Use the local MP4 at {clip_path} as the source artifact.",
+                        "Edit and package it for the appropriate channel.",
+                        "Do not claim publication until an actual platform receipt exists.",
+                    ],
+                },
+                "record": {
+                    "decision": "continue",
+                    "note": note,
+                    "updatedAt": now,
+                    "checks": {},
+                },
+            },
+        }
+
+    def complete_publisher_handoff(
+        self, render_id: str, task_id: str | None = None
+    ) -> dict[str, Any]:
+        row = self.db.execute(
+            "SELECT render_id FROM publisher_handoffs WHERE render_id=?", (render_id,)
+        ).fetchone()
+        if not row:
+            raise KeyError(render_id)
+        self.db.execute(
+            "UPDATE publisher_handoffs SET status='queued',task_id=?,"
+            "updated_at=CURRENT_TIMESTAMP WHERE render_id=?",
+            (task_id, render_id),
+        )
+        return {"render_id": render_id, "status": "queued", "task_id": task_id}
 
     def reconcile_for_worker_start(self) -> None:
         """Recover jobs only when a newly-exclusive worker actually starts."""
