@@ -20,6 +20,16 @@ mkdir -p "$state/logs" "$state/run" "$HOME/Library/LaunchAgents"
 sed -e "s|__REPO__|$repo|g" -e "s|__HOME__|$HOME|g" -e "s|__HERMES_VENV__|$hermes_venv|g" "$repo/scripts/com.techfren.live-clipper-v2.plist" > "$plist"
 rm -f "$state/run/worker.lock"
 launchctl bootout "gui/$(id -u)/com.techfren.live-clipper-v2" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$plist"
+for _ in $(seq 1 20); do
+  if ! launchctl print "gui/$(id -u)/com.techfren.live-clipper-v2" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.25
+done
+if ! launchctl bootstrap "gui/$(id -u)" "$plist"; then
+  launchctl bootout "gui/$(id -u)/com.techfren.live-clipper-v2" 2>/dev/null || true
+  sleep 1
+  launchctl bootstrap "gui/$(id -u)" "$plist"
+fi
 launchctl kickstart -k "gui/$(id -u)/com.techfren.live-clipper-v2"
 echo "Installed com.techfren.live-clipper-v2 from $repo"
