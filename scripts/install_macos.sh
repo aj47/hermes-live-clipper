@@ -11,7 +11,7 @@ python_bin="$(command -v python3.11 || true)"
 test -n "$python_bin" || { echo "Python 3.11+ is required" >&2; exit 1; }
 command -v ffmpeg >/dev/null || { echo "ffmpeg is required (brew install ffmpeg)" >&2; exit 1; }
 command -v yt-dlp >/dev/null || { echo "yt-dlp is required (brew install yt-dlp)" >&2; exit 1; }
-command -v transcribe-anything >/dev/null || command -v tr >/dev/null || { echo "transcribe-anything is required" >&2; exit 1; }
+command -v transcribe-anything >/dev/null || { echo "transcribe-anything is required" >&2; exit 1; }
 
 mkdir -p "$state/logs" "$state/run" "$HOME/Library/LaunchAgents"
 "$python_bin" -m venv "$repo/.venv"
