@@ -9,3 +9,4 @@ def test_dashboard_bundle_registers_with_host_and_uses_authenticated_fetch():
     assert '"Generated clips"' in bundle
     assert "previewClip" in bundle
     assert "saveClip" in bundle
+    assert "passive && currentPlayer && !currentPlayer.paused" in bundle

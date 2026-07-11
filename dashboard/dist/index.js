@@ -37,9 +37,10 @@ function formatDuration(seconds) {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
-async function refresh() {
+async function refresh({ passive = false } = {}) {
   try {
     const currentPlayer = document.querySelector(".clip-player video");
+    if (passive && currentPlayer && !currentPlayer.paused && !currentPlayer.ended) return;
     const playback = currentPlayer ? { time: currentPlayer.currentTime, paused: currentPlayer.paused } : null;
     const status = await request("/status");
     if (!state.selected && status.jobs.length) state.selected = status.jobs[0].id;
@@ -157,7 +158,7 @@ function transcriptPanel(words) {
 function LiveClipperApp() {
   useEffect(() => {
     refresh();
-    const timer = window.setInterval(refresh, 5000);
+    const timer = window.setInterval(() => refresh({ passive: true }), 5000);
     return () => window.clearInterval(timer);
   }, []);
   return h("main", { id: "hermes-live-clipper" });
