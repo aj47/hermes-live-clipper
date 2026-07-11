@@ -15,3 +15,6 @@ def test_dashboard_bundle_registers_with_host_and_uses_authenticated_fetch():
     assert "authedFetch(`/api/plugins/kanban${path}`" in bundle
     assert "It may upload and publish this MP4" in bundle
     assert "techfren-review/qa-decision" not in bundle
+    assert "CLIP SCORE" in bundle
+    assert "WHY IT HOOKS" in bundle
+    assert "oneSentence" in bundle

@@ -16,7 +16,7 @@ CANDIDATE_SCHEMA = {
                     "title": {"type": "string"},
                     "hook": {"type": "string"},
                     "payoff": {"type": "string"},
-                    "rationale": {"type": "string"},
+                    "rationale": {"type": "string", "maxLength": 220},
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                     "standalone_value": {"type": "number", "minimum": 0, "maximum": 1},
                 },
@@ -50,7 +50,8 @@ def analyze_window(
     result = complete_structured(
         instructions=(
             "Find high-payoff standalone livestream clips. Return only complete thoughts with a strong opening and payoff. "
-            "Prefer 20-90 seconds. Times must remain inside the supplied range. Do not invent words or moments."
+            "Prefer 20-90 seconds. Write rationale as one short, specific sentence explaining why the opening works as a hook. "
+            "Times must remain inside the supplied range. Do not invent words or moments."
         ),
         input=[{"type": "text", "text": build_transcript(words)}],
         json_schema=CANDIDATE_SCHEMA,

@@ -56,6 +56,13 @@ function formatDuration(seconds) {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
+function oneSentence(value, fallback) {
+  const text = String(value || fallback || "").replace(/\s+/g, " ").trim();
+  const first = text.match(/^.*?[.!?](?:\s|$)/)?.[0]?.trim() || text;
+  const short = first.length > 180 ? `${first.slice(0,177).replace(/\s+\S*$/, "")}…` : first;
+  return short && !/[.!?…]$/.test(short) ? `${short}.` : short;
+}
+
 async function refresh({ passive = false } = {}) {
   try {
     const currentPlayer = document.querySelector(".clip-player video");
@@ -138,7 +145,8 @@ function candidateCard(c) {
   const action = async name => { await request(`/candidates/${c.id}/action`, {method:"POST",body:JSON.stringify({action:name})}); refresh(); };
   const busy = c.state === "rendering" || c.state === "render_queued";
   const renderLabel = busy ? "Rendering…" : c.state === "draft_ready" ? "Render another version" : "Render clip";
-  return el("article", {class:"candidate"}, [el("div",{class:"score"},`${Math.round(c.confidence*100)}`),el("div",{class:"candidate-copy"},[el("h4",{},c.title),el("p",{},c.hook||c.rationale||""),el("small",{},`${formatDuration(c.end_seconds-c.start_seconds)} · ${c.state.replaceAll("_"," ")}`),el("div",{class:"actions"},[el("button",{onclick:()=>action("render"),...(busy?{disabled:"true"}:{})},renderLabel),el("button",{class:"secondary",onclick:()=>action("accept")},"Accept"),el("button",{class:"ghost",onclick:()=>action("reject")},"Reject")])])]);
+  const rationale = oneSentence(c.rationale, "Hermes ranked this as a strong standalone moment with a clear payoff.");
+  return el("article", {class:"candidate"}, [el("div",{class:"score","aria-label":`${Math.round(c.confidence*100)} out of 100 clip score`},[el("strong",{},`${Math.round(c.confidence*100)}`),el("span",{},"/ 100"),el("small",{},"CLIP SCORE")]),el("div",{class:"candidate-copy"},[el("h4",{},c.title),c.hook?el("p",{class:"candidate-hook"},c.hook):"",el("div",{class:"hook-rationale"},[el("span",{},"WHY IT HOOKS"),el("p",{},rationale)]),el("small",{class:"candidate-meta"},`${formatDuration(c.end_seconds-c.start_seconds)} · ${c.state.replaceAll("_"," ")}`),el("div",{class:"actions"},[el("button",{onclick:()=>action("render"),...(busy?{disabled:"true"}:{})},renderLabel),el("button",{class:"secondary",onclick:()=>action("accept")},"Accept"),el("button",{class:"ghost",onclick:()=>action("reject")},"Reject")])])]);
 }
 
 async function previewClip(renderItem) {
