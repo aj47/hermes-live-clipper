@@ -90,8 +90,11 @@ def test_publisher_handoff_preserves_render_and_tracks_queue(monkeypatch, servic
     assert progress["percent"] == 5
     task = handoff["task"]
     assert task["assignee"] == "live-clipper-publisher"
-    assert task["idempotency_key"] == "live-clipper-publisher:render-publisher"
+    assert task["idempotency_key"].startswith(
+        "live-clipper-publisher:render-publisher:"
+    )
     assert task["skills"] == ["youtube-upload", "computer-use"]
+    assert task["goal_mode"] is False
     assert str(outbox) in task["body"]
     assert "signed-in local TikTok and YouTube accounts" in task["body"]
     assert "Set status=published only when both" in task["body"]

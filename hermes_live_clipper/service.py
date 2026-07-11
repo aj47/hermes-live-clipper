@@ -528,11 +528,10 @@ Final response must repeat the truthful status, receipts, and any action the use
                 "workspace_kind": "scratch",
                 "tenant": "live-clipper",
                 "priority": 100,
-                "idempotency_key": f"live-clipper-publisher:{render_id}",
+                "idempotency_key": f"live-clipper-publisher:{render_id}:{attempt_id}",
                 "max_runtime_seconds": 3600,
                 "skills": ["youtube-upload", "computer-use"],
-                "goal_mode": True,
-                "goal_max_turns": 12,
+                "goal_mode": False,
             },
         }
 

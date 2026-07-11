@@ -373,8 +373,9 @@ async function saveClip(renderItem) {
 async function sendToHermesPublisher(renderItem) {
   const currentTask = state.publisherTasks[renderItem.id];
   const currentStatus = currentTask?.status || renderItem.publisher_status;
-  const retryTaskId = renderItem.publisher_task_id && (["blocked","failed","timed_out","gave_up","triage"].includes(currentStatus) || ["blocked","failed"].includes(renderItem.publisher_result?.status)) ? renderItem.publisher_task_id : null;
-  const action = retryTaskId ? "Retry" : "Start";
+  const retryTaskId = renderItem.publisher_task_id && ["blocked","failed","timed_out","gave_up"].includes(currentStatus) ? renderItem.publisher_task_id : null;
+  const retrying = Boolean(retryTaskId || ["blocked","failed"].includes(renderItem.publisher_result?.status));
+  const action = retrying ? "Retry" : "Start";
   if (!window.confirm(`${action} a Hermes publishing agent for “${renderItem.title}”? It may upload and publish this MP4 through the signed-in TikTok and YouTube accounts in this Mac’s existing Chrome session.`)) return;
   showError("");
   showNotice("Preparing the Hermes publishing desk…");
