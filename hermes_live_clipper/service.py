@@ -524,7 +524,7 @@ Final response must repeat the truthful status, receipts, and any action the use
             "task": {
                 "title": f"Publish Live Clipper render: {item['title']}",
                 "body": task_body,
-                "assignee": "default",
+                "assignee": self.settings.publisher_profile,
                 "workspace_kind": "scratch",
                 "tenant": "live-clipper",
                 "priority": 100,

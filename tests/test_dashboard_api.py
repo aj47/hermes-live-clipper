@@ -89,7 +89,7 @@ def test_publisher_handoff_preserves_render_and_tracks_queue(monkeypatch, servic
     assert progress["phase"] == "asset_prepared"
     assert progress["percent"] == 5
     task = handoff["task"]
-    assert task["assignee"] == "default"
+    assert task["assignee"] == "live-clipper-publisher"
     assert task["idempotency_key"] == "live-clipper-publisher:render-publisher"
     assert task["skills"] == ["youtube-upload", "computer-use"]
     assert str(outbox) in task["body"]

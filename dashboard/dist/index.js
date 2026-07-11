@@ -373,7 +373,7 @@ async function saveClip(renderItem) {
 async function sendToHermesPublisher(renderItem) {
   const currentTask = state.publisherTasks[renderItem.id];
   const currentStatus = currentTask?.status || renderItem.publisher_status;
-  const retryTaskId = renderItem.publisher_task_id && ["blocked","failed","timed_out","gave_up"].includes(currentStatus) ? renderItem.publisher_task_id : null;
+  const retryTaskId = renderItem.publisher_task_id && (["blocked","failed","timed_out","gave_up","triage"].includes(currentStatus) || ["blocked","failed"].includes(renderItem.publisher_result?.status)) ? renderItem.publisher_task_id : null;
   const action = retryTaskId ? "Retry" : "Start";
   if (!window.confirm(`${action} a Hermes publishing agent for “${renderItem.title}”? It may upload and publish this MP4 through the signed-in TikTok and YouTube accounts in this Mac’s existing Chrome session.`)) return;
   showError("");
@@ -424,7 +424,7 @@ function clipCard(item, mode = "editor") {
   const active = ["queued","ready","pending","waiting","running","claimed","in_progress"].includes(taskStatus);
   const finished = ["completed","done","blocked","failed","timed_out","gave_up"].includes(taskStatus) || Boolean(receipt);
   const tracked = Boolean(item.publisher_task_id);
-  const retryable = tracked && ["blocked","failed","timed_out","gave_up"].includes(taskStatus) && !published;
+  const retryable = tracked && (["blocked","failed","timed_out","gave_up","triage"].includes(taskStatus) || ["blocked","failed"].includes(receipt?.status)) && !published;
   const publisherLabel = published ? "Published to TikTok + YouTube" : active ? `Hermes ${taskStatus}…` : retryable ? "Retry with signed-in Chrome" : taskStatus === "unavailable" ? "Hermes status unavailable" : finished ? `Hermes ${receipt?.status || taskStatus}` : item.publisher_status === "prepared" ? "Retry Hermes publisher" : "Publish with Hermes";
   const statusText = receipt?.summary || item.publisher_progress?.message || (taskStatus && taskStatus !== "prepared" ? `Hermes task ${item.publisher_task_id || ""} · ${taskStatus}` : "Hermes will use the signed-in TikTok and YouTube accounts.");
   const locked = active || published || (tracked && !retryable) || (finished && !retryable);

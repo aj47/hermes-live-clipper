@@ -16,6 +16,7 @@ class Settings:
     max_memory_percent: float = 85.0
     max_transcript_lag_seconds: int = 120
     min_candidate_confidence: float = 0.72
+    publisher_profile: str = "live-clipper-publisher"
 
     @classmethod
     def load(cls) -> Settings:
@@ -28,6 +29,9 @@ class Settings:
             analysis_start_seconds=int(os.environ.get("HLC_ANALYSIS_START_SECONDS", "300")),
             max_cpu_percent=float(os.environ.get("HLC_MAX_CPU", "82")),
             max_memory_percent=float(os.environ.get("HLC_MAX_MEMORY", "85")),
+            publisher_profile=os.environ.get(
+                "HLC_PUBLISHER_PROFILE", "live-clipper-publisher"
+            ),
         )
 
     def ensure(self) -> None:

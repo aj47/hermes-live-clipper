@@ -18,6 +18,8 @@ def test_dashboard_bundle_registers_with_host_and_uses_authenticated_fetch():
     assert 'kanbanRequest("/boards", {method:"POST"' in bundle
     assert 'slug:publisherBoard,name:"Live Clipper Publishing"' in bundle
     assert '"Retry with signed-in Chrome"' in bundle
+    assert '"triage"].includes(currentStatus)' in bundle
+    assert 'renderItem.publisher_result?.status' in bundle
     assert 'method:"PATCH",body:JSON.stringify({status:"ready"})' in bundle
     assert 'retryTaskId?"reopened":"queued"' in bundle
     assert "state.error = message" in bundle

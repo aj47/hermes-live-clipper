@@ -36,7 +36,7 @@ chmod +x scripts/install_macos.sh
 
 Restart the Hermes dashboard after installation so it discovers `dashboard/manifest.json`. The worker runs under the separate LaunchAgent label `com.techfren.live-clipper-v2` and stores state in `~/.hermes/live-clipper-v2`.
 
-This is local software, not a hosted service. Review `scripts/install_macos.sh` before running it. Installation creates a Python virtual environment, a macOS LaunchAgent, and the local state directory above.
+This is local software, not a hosted service. Review `scripts/install_macos.sh` before running it. Installation creates a Python virtual environment, a macOS LaunchAgent, the local state directory above, and a dedicated `live-clipper-publisher` Hermes profile. Only that publisher profile receives the `computer_use` toolset needed to operate existing signed-in Chrome sessions; unrelated Hermes agents keep their existing tool configuration.
 
 Useful checks:
 
