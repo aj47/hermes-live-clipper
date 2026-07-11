@@ -22,3 +22,6 @@ def test_dashboard_bundle_registers_with_host_and_uses_authenticated_fetch():
     assert "oneSentence" in bundle
     assert "CLIP ACTIVITY" in bundle
     assert "activityPanel" in bundle
+    assert "latestReadyRender" in bundle
+    assert "View rendered clip" in bundle
+    assert "Render another version" not in bundle

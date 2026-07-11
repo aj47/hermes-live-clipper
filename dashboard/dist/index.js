@@ -179,12 +179,27 @@ function candidatePanel(candidates) {
   return el("div", {class:"panel tab-panel role-panel analyst-panel"}, [el("div", {class:"section-title"}, [el("div",{},[el("p",{class:"role-kicker"},"STORY ANALYST · AGENT 01"),el("h3",{},"Editorial opportunities"),el("p",{class:"muted"},"Hermes reviews the rolling transcript, scores each hook, and explains why the moment can stand alone.")]),el("span",{},`${candidates.length}`)]), el("div",{class:"candidate-grid"},candidates.length?candidates.map(candidateCard):[el("p",{class:"muted"},"Suggestions begin after five minutes of transcribed speech.")])]);
 }
 
+function latestReadyRender(candidateId) {
+  return [...(state.detail?.renders || [])]
+    .filter(item => item.candidate_id === candidateId && item.state === "ready")
+    .sort((a,b) => b.version - a.version)[0] || null;
+}
+
+async function openRenderedClip(candidateId) {
+  const ready = latestReadyRender(candidateId);
+  if (!ready) throw new Error("No completed render is available for this suggestion yet");
+  state.activeTab = "editor";
+  state.activityCandidate = null;
+  await previewClip(ready);
+}
+
 function candidateCard(c) {
   const action = async name => { await request(`/candidates/${c.id}/action`, {method:"POST",body:JSON.stringify({action:name})}); refresh(); };
   const busy = c.state === "rendering" || c.state === "render_queued";
-  const renderLabel = busy ? "Rendering…" : c.state === "draft_ready" ? "Render another version" : "Render clip";
+  const readyRender = latestReadyRender(c.id);
+  const primaryAction = readyRender ? el("button",{class:"view-render",onclick:()=>openRenderedClip(c.id).catch(error=>showError(error.message))},"View rendered clip") : el("button",{onclick:()=>action("render"),...(busy?{disabled:"true"}:{})},busy?"Rendering…":"Render clip");
   const rationale = oneSentence(c.rationale, "Hermes ranked this as a strong standalone moment with a clear payoff.");
-  return el("article", {class:"candidate"}, [el("div",{class:"score","aria-label":`${Math.round(c.confidence*100)} out of 100 clip score`},[el("strong",{},`${Math.round(c.confidence*100)}`),el("span",{},"/ 100"),el("small",{},"CLIP SCORE")]),el("div",{class:"candidate-copy"},[el("h4",{},c.title),c.hook?el("p",{class:"candidate-hook"},c.hook):"",el("div",{class:"hook-rationale"},[el("span",{},"WHY IT HOOKS"),el("p",{},rationale)]),el("small",{class:"candidate-meta"},`${formatDuration(c.end_seconds-c.start_seconds)} · ${c.state.replaceAll("_"," ")}`),el("div",{class:"actions"},[el("button",{onclick:()=>action("render"),...(busy?{disabled:"true"}:{})},renderLabel),el("button",{class:"secondary",onclick:()=>action("accept")},"Accept"),el("button",{class:"ghost",onclick:()=>action("reject")},"Reject"),el("button",{class:"ghost",onclick:()=>{state.activityCandidate=c.id;render(state.lastStatus);}},"Activity")])])]);
+  return el("article", {class:"candidate"}, [el("div",{class:"score","aria-label":`${Math.round(c.confidence*100)} out of 100 clip score`},[el("strong",{},`${Math.round(c.confidence*100)}`),el("span",{},"/ 100"),el("small",{},"CLIP SCORE")]),el("div",{class:"candidate-copy"},[el("h4",{},c.title),c.hook?el("p",{class:"candidate-hook"},c.hook):"",el("div",{class:"hook-rationale"},[el("span",{},"WHY IT HOOKS"),el("p",{},rationale)]),el("small",{class:"candidate-meta"},`${formatDuration(c.end_seconds-c.start_seconds)} · ${c.state.replaceAll("_"," ")}`),el("div",{class:"actions"},[primaryAction,el("button",{class:"secondary",onclick:()=>action("accept")},"Accept"),el("button",{class:"ghost",onclick:()=>action("reject")},"Reject"),el("button",{class:"ghost",onclick:()=>{state.activityCandidate=c.id;render(state.lastStatus);}},"Activity")])])]);
 }
 
 async function previewClip(renderItem) {
