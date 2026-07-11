@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .models import CandidateState
 from .service import LiveClipperService
 from .transcription import load_words
 
@@ -40,3 +41,12 @@ def backfill_transcripts(service: LiveClipperService, job_id: str | None = None)
             result["chunks"] += 1
             result["words"] += len(words)
     return result
+
+
+def retry_failed_renders(service: LiveClipperService, job_id: str) -> dict:
+    failed = service.db.execute(
+        "SELECT id FROM candidates WHERE job_id=? AND state=?", (job_id, CandidateState.FAILED)
+    ).fetchall()
+    for candidate in failed:
+        service.db.set_candidate_state(candidate["id"], CandidateState.RENDER_QUEUED)
+    return {"job_id": job_id, "queued": len(failed)}

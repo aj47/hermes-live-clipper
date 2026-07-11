@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from .models import CandidateState, JobState
-from .rendering import RenderError, render_clip
+from .rendering import RenderError, render_clip_from_chunks
 from .resolvers import ResolveError, YtDlpResolver
 from .resources import can_render
 from .service import LiveClipperService
@@ -205,9 +205,16 @@ class Worker:
                 CandidateState.RENDER_QUEUED,
             ),
         ).fetchone()
-        source = job_root / "source.ts"
-        if not candidate or not source.exists() or candidate["end_seconds"] > captured:
+        if not candidate or candidate["end_seconds"] > captured:
             return
+        chunks = [
+            dict(row)
+            for row in self.service.db.execute(
+                "SELECT * FROM chunks WHERE job_id=? AND start_seconds < ? "
+                "AND start_seconds + duration > ? ORDER BY sequence",
+                (job_id, candidate["end_seconds"], candidate["start_seconds"]),
+            ).fetchall()
+        ]
         candidate_id = candidate["id"]
         self.service.db.set_candidate_state(candidate_id, CandidateState.RENDERING)
         version = self.service.db.execute(
@@ -221,8 +228,8 @@ class Worker:
             (render_id, candidate_id, version, str(destination), "rendering"),
         )
         try:
-            info = render_clip(
-                source, destination, candidate["start_seconds"], candidate["end_seconds"]
+            info = render_clip_from_chunks(
+                chunks, destination, candidate["start_seconds"], candidate["end_seconds"]
             )
             duration = float(info["format"]["duration"])
             self.service.db.execute(

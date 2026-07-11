@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from .maintenance import backfill_transcripts
+from .maintenance import backfill_transcripts, retry_failed_renders
 from .service import get_service
 from .worker import Worker
 
@@ -15,6 +15,8 @@ def main() -> None:
     sub.add_parser("status")
     backfill = sub.add_parser("backfill")
     backfill.add_argument("--job-id")
+    retry = sub.add_parser("retry-failed-renders")
+    retry.add_argument("--job-id", required=True)
     add = sub.add_parser("add")
     add.add_argument("url")
     add.add_argument("--from-start", action="store_true")
@@ -26,6 +28,8 @@ def main() -> None:
         print(json.dumps(service.status(), indent=2, default=str))
     elif args.command == "backfill":
         print(json.dumps(backfill_transcripts(service, args.job_id), indent=2))
+    elif args.command == "retry-failed-renders":
+        print(json.dumps(retry_failed_renders(service, args.job_id), indent=2))
     elif args.command == "add":
         print(
             json.dumps(
