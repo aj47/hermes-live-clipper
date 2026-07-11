@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import shutil
 import threading
-from collections.abc import Callable
 from typing import Any
 
 from .config import Settings
@@ -17,12 +16,8 @@ class LiveClipperService:
         self.settings = settings or Settings.load()
         self.settings.ensure()
         self.db = Database(self.settings.root / "clipper.db")
-        self.llm_complete_structured: Callable[..., Any] | None = None
         self._lock = threading.RLock()
         self.reconcile()
-
-    def set_llm(self, complete_structured: Callable[..., Any]) -> None:
-        self.llm_complete_structured = complete_structured
 
     def add_job(self, url: str, start_mode: str = "live_edge") -> dict[str, Any]:
         identity = normalize_url(url)
@@ -97,10 +92,14 @@ class LiveClipperService:
         usage["workspace_bytes"] = sum(
             path.stat().st_size for path in self.settings.root.rglob("*") if path.is_file()
         )
+        analyzer = self.db.execute(
+            "SELECT heartbeat_at >= datetime('now','-60 seconds') available "
+            "FROM runtime WHERE component='analyzer'"
+        ).fetchone()
         return {
             "jobs": jobs,
             "resources": usage,
-            "llm_available": self.llm_complete_structured is not None,
+            "llm_available": bool(analyzer and analyzer["available"]),
         }
 
     def detail(self, job_id: str) -> dict[str, Any]:

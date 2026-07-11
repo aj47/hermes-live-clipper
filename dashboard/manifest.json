@@ -1,5 +1,5 @@
 {
-  "name": "live-clipper-v2",
+  "name": "hermes-live-clipper",
   "label": "Live Clipper",
   "description": "Monitor, transcribe, review, and render public livestream clips",
   "icon": "Scissors",
@@ -9,4 +9,3 @@
   "css": "dist/style.css",
   "api": "plugin_api.py"
 }
-

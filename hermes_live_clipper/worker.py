@@ -8,7 +8,6 @@ import threading
 import time
 from pathlib import Path
 
-from .analysis import analyze_window
 from .models import CandidateState, JobState
 from .rendering import RenderError, render_clip
 from .resolvers import ResolveError, YtDlpResolver
@@ -83,7 +82,6 @@ class Worker:
         elif current["state"] not in {JobState.FAILED, JobState.STOPPED}:
             self.service.db.set_job_state(job_id, JobState.FINALIZING)
             self._process_ready_chunks(job_id, chunks_dir, job_root)
-            self._analyze(job_id, force=True)
             self._render_ready(job_id, job_root)
             self.service.db.execute(
                 "UPDATE jobs SET ended_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,)
@@ -129,7 +127,6 @@ class Worker:
                     os.killpg(self.capture.pid, signal.SIGTERM)
                     break
                 self._process_ready_chunks(job_id, chunks_dir, job_root)
-                self._analyze(job_id)
                 self._render_ready(job_id, job_root)
                 time.sleep(2)
             self.capture.wait(timeout=15)
@@ -173,44 +170,6 @@ class Worker:
                     "transcription.failed",
                     {"sequence": sequence, "error": _safe_message(exc)},
                 )
-
-    def _analyze(self, job_id: str, force: bool = False) -> None:
-        complete = self.service.llm_complete_structured
-        if not complete:
-            return
-        latest = (
-            self.service.db.execute(
-                "SELECT MAX(end_seconds) value FROM words WHERE job_id=?", (job_id,)
-            ).fetchone()["value"]
-            or 0
-        )
-        if latest < self.settings.analysis_start_seconds and not force:
-            return
-        previous = (
-            self.service.db.execute(
-                "SELECT MAX(end_seconds) value FROM analysis_windows WHERE job_id=? AND status='complete'",
-                (job_id,),
-            ).fetchone()["value"]
-            or 0
-        )
-        if (
-            not force
-            and latest - previous
-            < self.settings.analysis_window_seconds - self.settings.analysis_overlap_seconds
-        ):
-            return
-        start = max(0, latest - self.settings.analysis_window_seconds)
-        words = self.service.db.words(job_id, start, latest)
-        try:
-            candidates = analyze_window(complete, words)
-            for candidate in candidates:
-                self.service.db.upsert_candidate(job_id, candidate)
-            self.service.db.execute(
-                "INSERT OR IGNORE INTO analysis_windows(job_id,start_seconds,end_seconds,status) VALUES(?,?,?,'complete')",
-                (job_id, start, latest),
-            )
-        except Exception as exc:
-            self.service.db.event(job_id, "analysis.failed", {"error": _safe_message(exc)})
 
     def _render_ready(self, job_id: str, job_root: Path) -> None:
         latest_word = (

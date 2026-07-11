@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 
+from .analyzer import start_plugin_analyzer
 from .service import get_service
 
 
 def register(ctx):
     service = get_service()
-    service.set_llm(ctx.llm.complete_structured)
+    start_plugin_analyzer(service, ctx.llm.complete_structured)
 
     def add(params, **_kwargs):
         return json.dumps(service.add_job(params["url"], params.get("start_mode", "live_edge")))
