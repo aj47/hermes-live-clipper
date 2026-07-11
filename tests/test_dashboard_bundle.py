@@ -15,6 +15,10 @@ def test_dashboard_bundle_registers_with_host_and_uses_authenticated_fetch():
     assert "sendToHermesPublisher" in bundle
     assert 'const publisherBoard = "live-clipper-publishing"' in bundle
     assert "authedFetch(`/api/plugins/kanban${path}`" in bundle
+    assert 'kanbanRequest("/boards", {method:"POST"' in bundle
+    assert 'slug:publisherBoard,name:"Live Clipper Publishing"' in bundle
+    assert "state.error = message" in bundle
+    assert 'role:"alert"}, state.error' in bundle
     assert "It may upload and publish this MP4" in bundle
     assert "techfren-review/qa-decision" not in bundle
     assert "CLIP SCORE" in bundle

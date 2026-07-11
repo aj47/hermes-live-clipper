@@ -9,7 +9,7 @@
   const h = React.createElement;
   const { useEffect } = SDK.hooks;
   const api = "/api/plugins/hermes-live-clipper";
-const state = { selected: null, detail: null, activeTab: "analyst", preview: null, lastStatus: null, notice: "", publisherTasks: {}, activityCandidate: null, activityRender: null, selectedJobs: new Set(), selectedCandidates: new Set(), selectedRenders: new Set(), cleanupPlan: null };
+const state = { selected: null, detail: null, activeTab: "analyst", preview: null, lastStatus: null, notice: "", error: "", publisherTasks: {}, activityCandidate: null, activityRender: null, selectedJobs: new Set(), selectedCandidates: new Set(), selectedRenders: new Set(), cleanupPlan: null };
 const publisherBoard = "live-clipper-publishing";
 
 const el = (tag, props = {}, children = []) => {
@@ -186,6 +186,7 @@ async function refresh({ passive = false } = {}) {
 }
 
 function showError(message) {
+  state.error = message;
   document.querySelector("#hlc-error")?.replaceChildren(message);
 }
 
@@ -200,7 +201,7 @@ function render(status) {
   if (!root) return;
   root.replaceChildren(
     el("header", {class:"hero"}, [el("div", {}, [el("p", {class:"eyebrow"}, "HERMES MEDIA WORKER"), el("h1", {}, "Live Clipper"), el("p", {class:"dek"}, "Turn a public livestream into transcript-grounded draft clips while it is still live.")]), resourcePills(status)]),
-    el("section", {class:"submit-card"}, [jobForm(), el("p", {class:"legal"}, "Only clip content you are authorized to use. Public availability does not grant redistribution rights."), el("p", {id:"hlc-notice", class:"success"}, state.notice), el("p", {id:"hlc-error", class:"error"})]),
+    el("section", {class:"submit-card"}, [jobForm(), el("p", {class:"legal"}, "Only clip content you are authorized to use. Public availability does not grant redistribution rights."), el("p", {id:"hlc-notice", class:"success"}, state.notice), el("p", {id:"hlc-error", class:"error",role:"alert"}, state.error)]),
     el("div", {class:"workspace"}, [jobList(status.jobs), detailPanel()]),
     bulkSelectionBar(),
     cleanupReview()
@@ -372,6 +373,8 @@ async function saveClip(renderItem) {
 async function sendToHermesPublisher(renderItem) {
   if (!window.confirm(`Start a Hermes publishing agent for “${renderItem.title}”? It may upload and publish this MP4 to the signed-in TikTok and YouTube accounts.`)) return;
   showError("");
+  showNotice("Preparing the Hermes publishing desk…");
+  await kanbanRequest("/boards", {method:"POST",body:JSON.stringify({slug:publisherBoard,name:"Live Clipper Publishing",description:"Durable publishing tasks created by the Live Clipper dashboard.",icon:"send",color:"#f6bd75",switch:false})});
   showNotice("Preserving the MP4 and starting a Hermes publisher…");
   const handoff = await request(`/renders/${renderItem.id}/publisher-handoff`, {method:"POST"});
   const result = await kanbanRequest(`/tasks?board=${encodeURIComponent(publisherBoard)}`, {method:"POST", body:JSON.stringify(handoff.task)});
