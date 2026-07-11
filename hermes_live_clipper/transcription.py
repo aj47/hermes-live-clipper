@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,15 @@ class TranscriptionError(RuntimeError):
 
 def transcribe_chunk(path: Path, output_dir: Path) -> list[dict[str, Any]]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    command = ["transcribe-anything", str(path), "--output_dir", str(output_dir)]
+    device = os.environ.get("HLC_TRANSCRIBE_DEVICE", "parakeet")
+    command = [
+        "transcribe-anything",
+        str(path),
+        "--device",
+        device,
+        "--output_dir",
+        str(output_dir),
+    ]
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode:
         raise TranscriptionError((result.stderr or result.stdout)[-1000:])
@@ -20,6 +29,10 @@ def transcribe_chunk(path: Path, output_dir: Path) -> list[dict[str, Any]]:
     transcript_path = next((candidate for candidate in candidates if candidate.exists()), None)
     if not transcript_path:
         raise TranscriptionError("transcribe-anything completed without producing out.json")
+    return load_words(transcript_path)
+
+
+def load_words(transcript_path: Path) -> list[dict[str, Any]]:
     return normalize_words(json.loads(transcript_path.read_text()))
 
 
@@ -31,6 +44,9 @@ def normalize_words(payload: Any) -> list[dict[str, Any]]:
         elif isinstance(payload.get("segments"), list):
             for segment in payload["segments"]:
                 raw_words.extend(segment.get("words") or [])
+        elif isinstance(payload.get("sentences"), list):
+            for sentence in payload["sentences"]:
+                raw_words.extend(sentence.get("words") or [])
     elif isinstance(payload, list):
         raw_words = payload
     normalized = []

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 
+from .maintenance import backfill_transcripts
 from .service import get_service
 from .worker import Worker
 
@@ -12,6 +13,8 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("worker")
     sub.add_parser("status")
+    backfill = sub.add_parser("backfill")
+    backfill.add_argument("--job-id")
     add = sub.add_parser("add")
     add.add_argument("url")
     add.add_argument("--from-start", action="store_true")
@@ -21,6 +24,8 @@ def main() -> None:
         Worker(service).run_forever()
     elif args.command == "status":
         print(json.dumps(service.status(), indent=2, default=str))
+    elif args.command == "backfill":
+        print(json.dumps(backfill_transcripts(service, args.job_id), indent=2))
     elif args.command == "add":
         print(
             json.dumps(

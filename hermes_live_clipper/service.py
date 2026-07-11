@@ -17,7 +17,6 @@ class LiveClipperService:
         self.settings.ensure()
         self.db = Database(self.settings.root / "clipper.db")
         self._lock = threading.RLock()
-        self.reconcile()
 
     def add_job(self, url: str, start_mode: str = "live_edge") -> dict[str, Any]:
         identity = normalize_url(url)
@@ -109,7 +108,8 @@ class LiveClipperService:
             "candidates": self.db.candidates(job_id),
         }
 
-    def reconcile(self) -> None:
+    def reconcile_for_worker_start(self) -> None:
+        """Recover jobs only when a newly-exclusive worker actually starts."""
         for job in self.db.jobs():
             if job["state"] in {JobState.CAPTURING, JobState.RECONNECTING, JobState.FINALIZING}:
                 self.db.set_job_state(

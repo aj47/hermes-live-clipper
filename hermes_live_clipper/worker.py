@@ -27,8 +27,9 @@ class Worker:
     def run_forever(self) -> None:
         lock = self._acquire_singleton()
         try:
-            signal.signal(signal.SIGTERM, lambda *_: self.stop_event.set())
-            signal.signal(signal.SIGINT, lambda *_: self.stop_event.set())
+            self.service.reconcile_for_worker_start()
+            signal.signal(signal.SIGTERM, self._request_shutdown)
+            signal.signal(signal.SIGINT, self._request_shutdown)
             while not self.stop_event.is_set():
                 job = self._next_job()
                 if not job:
@@ -37,6 +38,14 @@ class Worker:
                 self._run_job(job)
         finally:
             lock.unlink(missing_ok=True)
+
+    def _request_shutdown(self, *_args) -> None:
+        self.stop_event.set()
+        if self.capture and self.capture.poll() is None:
+            try:
+                os.killpg(self.capture.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
 
     def _next_job(self) -> dict | None:
         for job in reversed(self.service.db.jobs()):
