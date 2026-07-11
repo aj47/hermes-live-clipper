@@ -438,8 +438,14 @@ class LiveClipperService:
             now = datetime.now(UTC).isoformat()
             result_path = outbox / "publisher-result.json"
             progress_path = outbox / "publisher-progress.json"
+            attempt_id = now.replace(":", "-").replace("+", "-")
+            for current in (result_path, progress_path):
+                if current.exists():
+                    archived = outbox / f"{current.stem}-attempt-{attempt_id}{current.suffix}"
+                    os.replace(current, archived)
             metadata = {
                 "asset_id": f"live-clipper-{render_id}",
+                "attempt_id": attempt_id,
                 "render_id": render_id,
                 "job_id": item["job_id"],
                 "title": item["title"],
@@ -452,25 +458,24 @@ class LiveClipperService:
             metadata_tmp = outbox / ".handoff.json.tmp"
             metadata_tmp.write_text(json.dumps(metadata, indent=2) + "\n")
             os.replace(metadata_tmp, outbox / "handoff.json")
-            if not progress_path.exists():
-                self._write_publisher_progress(
-                    progress_path,
-                    {
-                        "status": "prepared",
-                        "phase": "asset_prepared",
-                        "percent": 5,
-                        "message": "Verified and preserved the MP4 for the Hermes publisher.",
-                        "platforms": [
-                            {"platform": "youtube", "status": "waiting"},
-                            {"platform": "tiktok", "status": "waiting"},
-                        ],
-                        "updated_at": now,
-                    },
-                )
+            self._write_publisher_progress(
+                progress_path,
+                {
+                    "status": "prepared",
+                    "phase": "asset_prepared",
+                    "percent": 5,
+                    "message": "Verified and preserved the MP4 for the Hermes publisher.",
+                    "platforms": [
+                        {"platform": "youtube", "status": "waiting"},
+                        {"platform": "tiktok", "status": "waiting"},
+                    ],
+                    "updated_at": now,
+                },
+            )
             self.db.execute(
                 "INSERT INTO publisher_handoffs(render_id,outbox_path,status) VALUES(?,?,'prepared') "
                 "ON CONFLICT(render_id) DO UPDATE SET outbox_path=excluded.outbox_path,"
-                "updated_at=CURRENT_TIMESTAMP",
+                "status='prepared',updated_at=CURRENT_TIMESTAMP",
                 (render_id, str(clip_path)),
             )
             if not existing_handoff:
@@ -500,8 +505,8 @@ Suggested title: {item["title"]}
 Execution requirements:
 1. Inspect the MP4 with ffprobe before uploading. Use it as-is; do not crop or overwrite it.
 2. Create concise platform-appropriate titles/descriptions. Do not invent claims beyond the clip.
-3. For YouTube, use the installed youtube-upload workflow when configured. Verify the resulting video ID, URL, and visibility.
-4. For TikTok, use browser/computer-use with the already signed-in local Chrome account. Stop as blocked if login, 2FA, account selection, or a final human decision is required.
+3. For YouTube, prefer the installed youtube-upload workflow when its OAuth credentials are configured. If API OAuth client secrets or tokens are absent, DO NOT block for that reason: use the computer_use tool against the existing Google Chrome app/window and upload through the already signed-in YouTube Studio session. Verify the resulting video ID, URL, and visibility.
+4. For TikTok, you MUST use the computer_use tool against the existing Google Chrome app/window and its signed-in human profile. Do not use browser_navigate, Playwright, or another isolated browser context for an authenticated upload. Those browser tools may only be used for unauthenticated public verification. Stop as blocked only if the existing Chrome session itself requires login, 2FA, account selection, or a final human decision.
 5. Never claim success from an upload attempt or process exit alone. Verify each real platform receipt.
 6. Do not expose credentials, cookies, or temporary upload tokens in logs or artifacts.
 7. Keep {progress_path} current throughout the run. Atomically replace it after every milestone using this schema:
@@ -525,7 +530,7 @@ Final response must repeat the truthful status, receipts, and any action the use
                 "priority": 100,
                 "idempotency_key": f"live-clipper-publisher:{render_id}",
                 "max_runtime_seconds": 3600,
-                "skills": ["youtube-upload"],
+                "skills": ["youtube-upload", "computer-use"],
                 "goal_mode": True,
                 "goal_max_turns": 12,
             },
@@ -550,15 +555,17 @@ Final response must repeat the truthful status, receipts, and any action the use
         progress_path = (
             self.settings.root / "publisher_outbox" / render_id / "publisher-progress.json"
         )
-        progress = self._read_publisher_progress(progress_path) or {}
         self._write_publisher_progress(
             progress_path,
             {
-                **progress,
                 "status": "queued",
                 "phase": "queued",
-                "percent": max(10, int(progress.get("percent", 0) or 0)),
+                "percent": 10,
                 "message": "Hermes publishing task is queued and waiting for a worker.",
+                "platforms": [
+                    {"platform": "youtube", "status": "waiting"},
+                    {"platform": "tiktok", "status": "waiting"},
+                ],
                 "updated_at": datetime.now(UTC).isoformat(),
             },
         )

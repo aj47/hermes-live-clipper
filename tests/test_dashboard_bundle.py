@@ -17,6 +17,9 @@ def test_dashboard_bundle_registers_with_host_and_uses_authenticated_fetch():
     assert "authedFetch(`/api/plugins/kanban${path}`" in bundle
     assert 'kanbanRequest("/boards", {method:"POST"' in bundle
     assert 'slug:publisherBoard,name:"Live Clipper Publishing"' in bundle
+    assert '"Retry with signed-in Chrome"' in bundle
+    assert 'method:"PATCH",body:JSON.stringify({status:"ready"})' in bundle
+    assert 'retryTaskId?"reopened":"queued"' in bundle
     assert "state.error = message" in bundle
     assert 'role:"alert"}, state.error' in bundle
     assert "It may upload and publish this MP4" in bundle

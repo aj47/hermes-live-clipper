@@ -91,12 +91,15 @@ def test_publisher_handoff_preserves_render_and_tracks_queue(monkeypatch, servic
     task = handoff["task"]
     assert task["assignee"] == "default"
     assert task["idempotency_key"] == "live-clipper-publisher:render-publisher"
-    assert task["skills"] == ["youtube-upload"]
+    assert task["skills"] == ["youtube-upload", "computer-use"]
     assert str(outbox) in task["body"]
     assert "signed-in local TikTok and YouTube accounts" in task["body"]
     assert "Set status=published only when both" in task["body"]
     assert str(progress_path) in task["body"]
     assert "youtube_uploading" in task["body"]
+    assert "existing Google Chrome app/window" in task["body"]
+    assert "Do not use browser_navigate" in task["body"]
+    assert "DO NOT block" in task["body"]
 
     completed = client.post(
         "/renders/render-publisher/publisher-handoff/complete",
@@ -127,6 +130,60 @@ def test_publisher_handoff_preserves_render_and_tracks_queue(monkeypatch, servic
     detail = client.get(f"/jobs/{job['id']}").json()
     assert detail["renders"][0]["publisher_result"]["status"] == "published"
     assert detail["renders"][0]["publisher_result"]["summary"] == "Both verified"
+
+
+def test_publisher_retry_archives_blocked_attempt_and_resets_progress(monkeypatch, service):
+    job = service.add_job("https://twitch.tv/techfren")
+    candidate_id = service.db.upsert_candidate(
+        job["id"],
+        {
+            "start_seconds": 20,
+            "end_seconds": 50,
+            "title": "Retryable clip",
+            "confidence": 0.9,
+            "standalone_value": 0.8,
+        },
+    )
+    source = service.settings.root / "jobs" / job["id"] / "renders" / "clip.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"fake-mp4")
+    service.db.execute(
+        "INSERT INTO renders(id,candidate_id,version,path,duration,state) VALUES(?,?,?,?,?,?)",
+        ("render-retry", candidate_id, 1, str(source), 30, "ready"),
+    )
+    client = load_router(monkeypatch, service)
+    first = client.post("/renders/render-retry/publisher-handoff").json()
+    client.post(
+        "/renders/render-retry/publisher-handoff/complete",
+        json={"task_id": "hermes-task-retry"},
+    )
+    outbox = Path(first["outbox_path"]).parent
+    (outbox / "publisher-progress.json").write_text(
+        '{"status":"blocked","phase":"verifying","percent":95,"platforms":[]}'
+    )
+    (outbox / "publisher-result.json").write_text(
+        '{"status":"blocked","summary":"Needs signed-in Chrome","platforms":[]}'
+    )
+
+    retried = client.post("/renders/render-retry/publisher-handoff")
+    assert retried.status_code == 200
+    assert list(outbox.glob("publisher-result-attempt-*.json"))
+    assert list(outbox.glob("publisher-progress-attempt-*.json"))
+    assert not (outbox / "publisher-result.json").exists()
+    prepared = service._read_publisher_progress(outbox / "publisher-progress.json")
+    assert prepared["status"] == "prepared"
+    assert prepared["percent"] == 5
+    assert all(item["status"] == "waiting" for item in prepared["platforms"])
+
+    completed = client.post(
+        "/renders/render-retry/publisher-handoff/complete",
+        json={"task_id": "hermes-task-retry"},
+    )
+    assert completed.status_code == 200
+    queued = service._read_publisher_progress(outbox / "publisher-progress.json")
+    assert queued["status"] == "queued"
+    assert queued["percent"] == 10
+    assert all(item["status"] == "waiting" for item in queued["platforms"])
 
 
 def test_cleanup_preview_and_execute_routes(monkeypatch, service):

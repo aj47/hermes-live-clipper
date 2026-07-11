@@ -371,20 +371,31 @@ async function saveClip(renderItem) {
 }
 
 async function sendToHermesPublisher(renderItem) {
-  if (!window.confirm(`Start a Hermes publishing agent for “${renderItem.title}”? It may upload and publish this MP4 to the signed-in TikTok and YouTube accounts.`)) return;
+  const currentTask = state.publisherTasks[renderItem.id];
+  const currentStatus = currentTask?.status || renderItem.publisher_status;
+  const retryTaskId = renderItem.publisher_task_id && ["blocked","failed","timed_out","gave_up"].includes(currentStatus) ? renderItem.publisher_task_id : null;
+  const action = retryTaskId ? "Retry" : "Start";
+  if (!window.confirm(`${action} a Hermes publishing agent for “${renderItem.title}”? It may upload and publish this MP4 through the signed-in TikTok and YouTube accounts in Herman’s existing Chrome session.`)) return;
   showError("");
   showNotice("Preparing the Hermes publishing desk…");
   await kanbanRequest("/boards", {method:"POST",body:JSON.stringify({slug:publisherBoard,name:"Live Clipper Publishing",description:"Durable publishing tasks created by the Live Clipper dashboard.",icon:"send",color:"#f6bd75",switch:false})});
   showNotice("Preserving the MP4 and starting a Hermes publisher…");
   const handoff = await request(`/renders/${renderItem.id}/publisher-handoff`, {method:"POST"});
-  const result = await kanbanRequest(`/tasks?board=${encodeURIComponent(publisherBoard)}`, {method:"POST", body:JSON.stringify(handoff.task)});
-  const task = result.task || result;
-  const taskId = task.id || task.task_id || result.taskId || null;
+  let taskId = retryTaskId;
+  if (retryTaskId) {
+    const taskPath = `/tasks/${encodeURIComponent(retryTaskId)}?board=${encodeURIComponent(publisherBoard)}`;
+    await kanbanRequest(taskPath, {method:"PATCH",body:JSON.stringify({title:handoff.task.title,body:handoff.task.body,priority:handoff.task.priority,assignee:handoff.task.assignee})});
+    await kanbanRequest(taskPath, {method:"PATCH",body:JSON.stringify({status:"ready"})});
+  } else {
+    const result = await kanbanRequest(`/tasks?board=${encodeURIComponent(publisherBoard)}`, {method:"POST", body:JSON.stringify(handoff.task)});
+    const task = result.task || result;
+    taskId = task.id || task.task_id || result.taskId || null;
+  }
   if (!taskId) throw new Error("Hermes created a publisher task without returning its task ID");
   await request(`/renders/${renderItem.id}/publisher-handoff/complete`, {method:"POST", body:JSON.stringify({task_id:taskId})});
   state.activityCandidate = renderItem.candidate_id;
   state.activityRender = renderItem.id;
-  showNotice(`Hermes publisher task ${taskId} is queued on this Mac. Publication will only be shown after verified platform receipts.`);
+  showNotice(`Hermes publisher task ${taskId} is ${retryTaskId?"reopened":"queued"} on this Mac. Publication will only be shown after verified platform receipts.`);
   await refresh();
 }
 
@@ -413,9 +424,10 @@ function clipCard(item, mode = "editor") {
   const active = ["queued","ready","pending","waiting","running","claimed","in_progress"].includes(taskStatus);
   const finished = ["completed","done","blocked","failed","timed_out","gave_up"].includes(taskStatus) || Boolean(receipt);
   const tracked = Boolean(item.publisher_task_id);
-  const publisherLabel = published ? "Published to TikTok + YouTube" : active ? `Hermes ${taskStatus}…` : taskStatus === "unavailable" ? "Hermes status unavailable" : finished ? `Hermes ${receipt?.status || taskStatus}` : item.publisher_status === "prepared" ? "Retry Hermes publisher" : "Publish with Hermes";
+  const retryable = tracked && ["blocked","failed","timed_out","gave_up"].includes(taskStatus) && !published;
+  const publisherLabel = published ? "Published to TikTok + YouTube" : active ? `Hermes ${taskStatus}…` : retryable ? "Retry with signed-in Chrome" : taskStatus === "unavailable" ? "Hermes status unavailable" : finished ? `Hermes ${receipt?.status || taskStatus}` : item.publisher_status === "prepared" ? "Retry Hermes publisher" : "Publish with Hermes";
   const statusText = receipt?.summary || item.publisher_progress?.message || (taskStatus && taskStatus !== "prepared" ? `Hermes task ${item.publisher_task_id || ""} · ${taskStatus}` : "Hermes will use the signed-in TikTok and YouTube accounts.");
-  const locked = tracked || active || finished || published;
+  const locked = active || published || (tracked && !retryable) || (finished && !retryable);
   const roleAction = mode === "publisher" ? el("button",{class:"publisher",onclick:()=>sendToHermesPublisher(item).catch(error=>{showNotice("");showError(error.message);}),...(locked?{disabled:"true"}:{})},publisherLabel) : el("button",{class:"publisher",onclick:()=>{state.activeTab="publisher";state.activityCandidate=item.candidate_id;state.activityRender=item.id;render(state.lastStatus);}},"Open in Publisher");
   const consoleLabel = mode === "publisher" && (tracked||item.publisher_progress) ? "Publisher console" : "Activity";
   return el("article",{class:`clip-card ${state.preview?.id===item.id?"selected":""} ${state.selectedRenders.has(item.id)?"selected-for-cleanup":""}`},[selectionCheckbox("render",item.id,`Select render ${item.title} version ${item.version}`),el("div",{class:"clip-card-top"},[el("span",{class:"version"},`v${item.version}`),el("span",{class:`ready-dot ${published?"published":""}`},published?"published":active?"Hermes working":"ready")]),el("h4",{},item.title),el("p",{class:"clip-meta"},`${formatDuration(item.duration)} · ${formatBytes(item.size_bytes)} · ${item.start_seconds.toFixed(1)}–${item.end_seconds.toFixed(1)}s`),el("p",{class:"publisher-status"},statusText),mode==="publisher"?publisherMiniProgress(item):"",receiptLinks(receipt),el("div",{class:"actions clip-actions"},[el("button",{onclick:()=>previewClip(item).catch(error=>showError(error.message))},"Preview"),el("button",{class:"secondary",onclick:()=>saveClip(item).catch(error=>showError(error.message))},"Save MP4"),roleAction,el("button",{class:"ghost",onclick:()=>{state.activityCandidate=item.candidate_id;state.activityRender=mode==="publisher"?item.id:null;render(state.lastStatus);}},consoleLabel)])]);
