@@ -5,7 +5,7 @@ repo="$(cd "$(dirname "$0")/.." && pwd)"
 state="$HOME/.hermes/live-clipper-v2"
 plist="$HOME/Library/LaunchAgents/com.techfren.live-clipper-v2.plist"
 hermes_venv="$HOME/.hermes/hermes-agent/venv/bin"
-export PATH="$repo/.venv/bin:$hermes_venv:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$repo/.venv/bin:$hermes_venv:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 python_bin="$(command -v python3.11 || true)"
 hermes_cli="$hermes_venv/hermes"
 publisher_profile="${HLC_PUBLISHER_PROFILE:-live-clipper-publisher}"
@@ -26,6 +26,16 @@ if [[ ! -d "$HOME/.hermes/profiles/$publisher_profile" ]]; then
     --description "Publishes verified Live Clipper renders through signed-in local browser sessions."
 fi
 "$hermes_cli" -p "$publisher_profile" tools enable computer_use --platform cli
+cua_driver_cmd="$(command -v cua-driver || true)"
+if [[ -n "$cua_driver_cmd" ]]; then
+  publisher_env="$HOME/.hermes/profiles/$publisher_profile/.env"
+  touch "$publisher_env"
+  env_tmp="$(mktemp "${publisher_env}.XXXXXX")"
+  grep -v '^HERMES_CUA_DRIVER_CMD=' "$publisher_env" > "$env_tmp" || true
+  printf 'HERMES_CUA_DRIVER_CMD=%s\n' "$cua_driver_cmd" >> "$env_tmp"
+  chmod --reference="$publisher_env" "$env_tmp" 2>/dev/null || chmod 600 "$env_tmp"
+  mv "$env_tmp" "$publisher_env"
+fi
 sed -e "s|__REPO__|$repo|g" -e "s|__HOME__|$HOME|g" -e "s|__HERMES_VENV__|$hermes_venv|g" "$repo/scripts/com.techfren.live-clipper-v2.plist" > "$plist"
 rm -f "$state/run/worker.lock"
 launchctl bootout "gui/$(id -u)/com.techfren.live-clipper-v2" 2>/dev/null || true

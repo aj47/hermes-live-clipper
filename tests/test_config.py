@@ -16,3 +16,5 @@ def test_install_script_provisions_scoped_publisher_profile():
     assert 'publisher_profile="${HLC_PUBLISHER_PROFILE:-live-clipper-publisher}"' in script
     assert 'profile create "$publisher_profile"' in script
     assert 'tools enable computer_use --platform cli' in script
+    assert '$HOME/.local/bin' in script
+    assert "HERMES_CUA_DRIVER_CMD=%s" in script
