@@ -24,3 +24,26 @@ def test_create_and_read_job(monkeypatch, service):
     detail = client.get(f"/jobs/{job_id}")
     assert detail.status_code == 200
     assert detail.json()["job"]["provider"] == "twitch"
+    assert detail.json()["renders"] == []
+
+
+def test_job_detail_includes_generated_render_versions(monkeypatch, service):
+    job = service.add_job("https://twitch.tv/example_streamer")
+    candidate_id = service.db.upsert_candidate(
+        job["id"],
+        {
+            "start_seconds": 20,
+            "end_seconds": 50,
+            "title": "Generated clip",
+            "confidence": 0.9,
+            "standalone_value": 0.8,
+        },
+    )
+    service.db.execute(
+        "INSERT INTO renders(id,candidate_id,version,path,duration,state) VALUES(?,?,?,?,?,?)",
+        ("render-v1", candidate_id, 1, "/tmp/clip.mp4", 30, "ready"),
+    )
+    detail = load_router(monkeypatch, service).get(f"/jobs/{job['id']}").json()
+    assert detail["renders"][0]["id"] == "render-v1"
+    assert detail["renders"][0]["title"] == "Generated clip"
+    assert detail["renders"][0]["candidate_state"] == "suggested"

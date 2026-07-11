@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import threading
+from pathlib import Path
 from typing import Any
 
 from .config import Settings
@@ -106,7 +107,23 @@ class LiveClipperService:
             "job": self.db.job(job_id),
             "words": self.db.words(job_id),
             "candidates": self.db.candidates(job_id),
+            "renders": self.renders(job_id),
         }
+
+    def renders(self, job_id: str) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            "SELECT r.*,c.job_id,c.title,c.start_seconds,c.end_seconds,c.confidence,"
+            "c.state candidate_state FROM renders r JOIN candidates c ON c.id=r.candidate_id "
+            "WHERE c.job_id=? ORDER BY r.created_at DESC,r.version DESC",
+            (job_id,),
+        ).fetchall()
+        renders = []
+        for row in rows:
+            item = dict(row)
+            path = Path(item.pop("path"))
+            item["size_bytes"] = path.stat().st_size if path.exists() else None
+            renders.append(item)
+        return renders
 
     def reconcile_for_worker_start(self) -> None:
         """Recover jobs only when a newly-exclusive worker actually starts."""
