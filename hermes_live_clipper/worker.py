@@ -227,6 +227,16 @@ class Worker:
             "INSERT INTO renders(id,candidate_id,version,path,state) VALUES(?,?,?,?,?)",
             (render_id, candidate_id, version, str(destination), "rendering"),
         )
+        self.service.db.clip_activity(
+            job_id,
+            candidate_id,
+            "video_editor",
+            "render_started",
+            "running",
+            f"Started render version {version} from captured source chunks.",
+            {"version": version},
+            render_id,
+        )
         try:
             info = render_clip_from_chunks(
                 chunks, destination, candidate["start_seconds"], candidate["end_seconds"]
@@ -236,12 +246,32 @@ class Worker:
                 "UPDATE renders SET state='ready',duration=? WHERE id=?", (duration, render_id)
             )
             self.service.db.set_candidate_state(candidate_id, CandidateState.DRAFT_READY)
+            self.service.db.clip_activity(
+                job_id,
+                candidate_id,
+                "video_editor",
+                "render_ready",
+                "completed",
+                f"Completed render version {version} and verified its audio and video.",
+                {"version": version, "duration": duration},
+                render_id,
+            )
         except RenderError as exc:
             self.service.db.execute(
                 "UPDATE renders SET state='failed',error=? WHERE id=?",
                 (_safe_message(exc), render_id),
             )
             self.service.db.set_candidate_state(candidate_id, CandidateState.FAILED)
+            self.service.db.clip_activity(
+                job_id,
+                candidate_id,
+                "video_editor",
+                "render_failed",
+                "failed",
+                f"Render version {version} failed: {_safe_message(exc)}.",
+                {"version": version},
+                render_id,
+            )
 
     def _acquire_singleton(self) -> Path:
         lock = self.settings.root / "run" / "worker.lock"

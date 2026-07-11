@@ -9,7 +9,7 @@
   const h = React.createElement;
   const { useEffect } = SDK.hooks;
   const api = "/api/plugins/hermes-live-clipper";
-const state = { selected: null, detail: null, activeTab: "suggestions", preview: null, lastStatus: null, notice: "", publisherTasks: {} };
+const state = { selected: null, detail: null, activeTab: "analyst", preview: null, lastStatus: null, notice: "", publisherTasks: {}, activityCandidate: null };
 const publisherBoard = "live-clipper-publishing";
 
 const el = (tag, props = {}, children = []) => {
@@ -54,6 +54,13 @@ function formatDuration(seconds) {
   if (seconds == null) return "—";
   const total = Math.round(Number(seconds));
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function formatActivityTime(value) {
+  if (!value) return "just now";
+  const normalized = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
 }
 
 function oneSentence(value, fallback) {
@@ -122,23 +129,54 @@ function jobList(jobs) {
 function detailPanel() {
   if (!state.detail) return el("section", {class:"empty"}, "Paste a livestream link to begin.");
   const {job, words, candidates, renders = []} = state.detail;
-  const readyCount = renders.filter(render => render.state === "ready").length;
-  const tabs = [
-    ["suggestions", "Suggestions", candidates.length],
-    ["clips", "Generated clips", readyCount],
-    ["transcript", "Transcript", words.length],
-  ];
-  const content = state.activeTab === "clips" ? clipsPanel(renders) : state.activeTab === "transcript" ? transcriptPanel(words) : candidatePanel(candidates);
+  const content = state.activeTab === "editor" ? clipsPanel(renders, "editor") : state.activeTab === "publisher" ? clipsPanel(renders, "publisher") : state.activeTab === "transcript" ? transcriptPanel(words) : candidatePanel(candidates);
   return el("section", {class:"detail"}, [
     el("div", {class:"detail-head"}, [el("div", {}, [el("p", {class:"eyebrow"}, job.provider || "STREAM"),el("h2", {}, job.title || job.external_id),el("a", {href:job.canonical_url,target:"_blank",rel:"noreferrer"}, job.canonical_url)]),el("button", {class:"secondary",onclick:async()=>{await request(`/jobs/${job.id}/stop`,{method:"POST"});refresh();}}, "Stop")]),
     job.last_error?el("p",{class:"notice"},job.last_error):"",
-    el("nav", {class:"clip-tabs", "aria-label":"Live clipper views"}, tabs.map(([id,label,count]) => el("button", {class:id===state.activeTab?"active":"", onclick:()=>{state.activeTab=id;render(state.lastStatus);}}, [label,el("span",{},count)]))),
+    pipelineRail(candidates, renders, words),
+    activityPanel(),
     content,
   ]);
 }
 
+function pipelineRail(candidates, renders, words) {
+  const ready = renders.filter(item => item.state === "ready").length;
+  const handedOff = renders.filter(item => item.publisher_status || item.publisher_result).length;
+  const published = renders.filter(item => item.publisher_result?.status === "published").length;
+  const stages = [
+    {id:"analyst",number:"01",role:"Story Analyst",verb:"Finds the story",metric:`${candidates.length} moments`,copy:"Scores hooks, payoff, and standalone value."},
+    {id:"editor",number:"02",role:"Video Editor",verb:"Builds the draft",metric:`${ready} renders`,copy:"Cuts and verifies source-aspect video."},
+    {id:"publisher",number:"03",role:"Publisher & Growth",verb:"Ships the story",metric:published?`${published} published`:`${handedOff} handed off`,copy:"Packages, publishes, and verifies receipts."},
+  ];
+  return el("div",{class:"pipeline-shell"},[
+    el("nav",{class:"pipeline-rail","aria-label":"Clip production agents"},stages.map((stage,index)=>el("button",{class:`agent-stage ${state.activeTab===stage.id?"active":""}`,onclick:()=>{state.activeTab=stage.id;state.activityCandidate=null;render(state.lastStatus);}},[el("span",{class:"stage-number"},stage.number),el("div",{},[el("span",{class:"stage-verb"},stage.verb),el("strong",{},stage.role),el("p",{},stage.copy)]),el("span",{class:"stage-metric"},stage.metric),index<stages.length-1?el("span",{class:"stage-arrow","aria-hidden":"true"},"→"):""]))),
+    el("button",{class:`transcript-switch ${state.activeTab==="transcript"?"active":""}`,onclick:()=>{state.activeTab="transcript";state.activityCandidate=null;render(state.lastStatus);}},["Transcript",el("span",{},words.length)]),
+  ]);
+}
+
+function activityPanel() {
+  if (!state.activityCandidate || !state.detail) return "";
+  const candidate = state.detail.candidates.find(item => item.id === state.activityCandidate);
+  if (!candidate) return "";
+  const entries = (state.detail.activity || []).filter(item => item.candidate_id === candidate.id);
+  const relevantRenders = (state.detail.renders || []).filter(item => item.candidate_id === candidate.id && item.publisher_task_id);
+  const liveTask = relevantRenders.map(item => state.publisherTasks[item.id]).find(Boolean);
+  const roles = {
+    story_analyst:{initials:"SA",label:"Story Analyst"},
+    video_editor:{initials:"VE",label:"Video Editor"},
+    publisher_growth:{initials:"PG",label:"Publisher & Growth"},
+    review_desk:{initials:"AJ",label:"Review Desk"},
+    system:{initials:"SY",label:"System"},
+  };
+  return el("section",{class:"activity-panel"},[
+    el("div",{class:"activity-head"},[el("div",{},[el("p",{class:"eyebrow"},"CLIP ACTIVITY"),el("h3",{},candidate.title),el("p",{class:"muted"},`${entries.length} recorded actions across the production pipeline.`)]),el("button",{class:"ghost",onclick:()=>{state.activityCandidate=null;render(state.lastStatus);},"aria-label":"Close clip activity"},"Close")]),
+    liveTask?el("div",{class:"live-agent"},[el("span",{class:"pulse"}),el("strong",{},"Hermes Publisher"),el("span",{},String(liveTask.status||"queued").replaceAll("_"," ")),liveTask.current_run_id?el("code",{},liveTask.current_run_id):""]):"",
+    el("div",{class:"activity-timeline"},entries.length?entries.map(entry=>{const role=roles[entry.role]||roles.system;return el("article",{class:"activity-entry","data-role":entry.role},[el("span",{class:"agent-avatar"},role.initials),el("div",{class:"activity-copy"},[el("div",{class:"activity-line"},[el("strong",{},role.label),el("span",{class:`activity-status ${entry.status}`},String(entry.status).replaceAll("_"," ")),el("time",{},formatActivityTime(entry.created_at))]),el("p",{},entry.message),entry.render_id?el("code",{},entry.render_id):""])]);}):[el("p",{class:"muted"},"No activity has been recorded for this clip yet.")]),
+  ]);
+}
+
 function candidatePanel(candidates) {
-  return el("div", {class:"panel tab-panel"}, [el("div", {class:"section-title"}, [el("div",{},[el("h3",{},"Clip suggestions"),el("p",{class:"muted"},"Strong moments are rendered automatically. Render again to create another version.")]),el("span",{},`${candidates.length}`)]), el("div",{class:"candidate-grid"},candidates.length?candidates.map(candidateCard):[el("p",{class:"muted"},"Suggestions begin after five minutes of transcribed speech.")])]);
+  return el("div", {class:"panel tab-panel role-panel analyst-panel"}, [el("div", {class:"section-title"}, [el("div",{},[el("p",{class:"role-kicker"},"STORY ANALYST · AGENT 01"),el("h3",{},"Editorial opportunities"),el("p",{class:"muted"},"Hermes reviews the rolling transcript, scores each hook, and explains why the moment can stand alone.")]),el("span",{},`${candidates.length}`)]), el("div",{class:"candidate-grid"},candidates.length?candidates.map(candidateCard):[el("p",{class:"muted"},"Suggestions begin after five minutes of transcribed speech.")])]);
 }
 
 function candidateCard(c) {
@@ -146,7 +184,7 @@ function candidateCard(c) {
   const busy = c.state === "rendering" || c.state === "render_queued";
   const renderLabel = busy ? "Rendering…" : c.state === "draft_ready" ? "Render another version" : "Render clip";
   const rationale = oneSentence(c.rationale, "Hermes ranked this as a strong standalone moment with a clear payoff.");
-  return el("article", {class:"candidate"}, [el("div",{class:"score","aria-label":`${Math.round(c.confidence*100)} out of 100 clip score`},[el("strong",{},`${Math.round(c.confidence*100)}`),el("span",{},"/ 100"),el("small",{},"CLIP SCORE")]),el("div",{class:"candidate-copy"},[el("h4",{},c.title),c.hook?el("p",{class:"candidate-hook"},c.hook):"",el("div",{class:"hook-rationale"},[el("span",{},"WHY IT HOOKS"),el("p",{},rationale)]),el("small",{class:"candidate-meta"},`${formatDuration(c.end_seconds-c.start_seconds)} · ${c.state.replaceAll("_"," ")}`),el("div",{class:"actions"},[el("button",{onclick:()=>action("render"),...(busy?{disabled:"true"}:{})},renderLabel),el("button",{class:"secondary",onclick:()=>action("accept")},"Accept"),el("button",{class:"ghost",onclick:()=>action("reject")},"Reject")])])]);
+  return el("article", {class:"candidate"}, [el("div",{class:"score","aria-label":`${Math.round(c.confidence*100)} out of 100 clip score`},[el("strong",{},`${Math.round(c.confidence*100)}`),el("span",{},"/ 100"),el("small",{},"CLIP SCORE")]),el("div",{class:"candidate-copy"},[el("h4",{},c.title),c.hook?el("p",{class:"candidate-hook"},c.hook):"",el("div",{class:"hook-rationale"},[el("span",{},"WHY IT HOOKS"),el("p",{},rationale)]),el("small",{class:"candidate-meta"},`${formatDuration(c.end_seconds-c.start_seconds)} · ${c.state.replaceAll("_"," ")}`),el("div",{class:"actions"},[el("button",{onclick:()=>action("render"),...(busy?{disabled:"true"}:{})},renderLabel),el("button",{class:"secondary",onclick:()=>action("accept")},"Accept"),el("button",{class:"ghost",onclick:()=>action("reject")},"Reject"),el("button",{class:"ghost",onclick:()=>{state.activityCandidate=c.id;render(state.lastStatus);}},"Activity")])])]);
 }
 
 async function previewClip(renderItem) {
@@ -182,21 +220,23 @@ async function sendToHermesPublisher(renderItem) {
   await refresh();
 }
 
-function clipsPanel(renders) {
+function clipsPanel(renders, mode = "editor") {
   const ready = renders.filter(item => item.state === "ready");
   const inFlight = renders.filter(item => item.state === "rendering");
   const failed = renders.filter(item => item.state === "failed");
   const previewItem = ready.find(item => item.id === state.preview?.id);
-  return el("div", {class:"tab-panel clips-view"}, [
+  const publisherMode = mode === "publisher";
+  const ordered = publisherMode ? [...ready].sort((a,b)=>Number(Boolean(b.publisher_status))-Number(Boolean(a.publisher_status))||b.confidence-a.confidence) : ready;
+  return el("div", {class:`tab-panel clips-view role-panel ${publisherMode?"publisher-panel":"editor-panel"}`}, [
     previewItem ? el("section",{class:"clip-player"},[el("div",{class:"player-copy"},[el("p",{class:"eyebrow"},`VERSION ${previewItem.version}`),el("h3",{},previewItem.title),el("p",{class:"muted"},`${formatDuration(previewItem.duration)} · ${Math.round(previewItem.confidence*100)} confidence`)]),el("video",{src:state.preview.url,controls:"true",preload:"metadata"})]) : "",
-    el("div", {class:"section-title"}, [el("div",{},[el("h3",{},"Generated clips"),el("p",{class:"muted"},"Every completed version stays here until you delete the stream.")]),el("span",{},`${ready.length} ready`)]),
-    inFlight.length ? el("div",{class:"render-strip"},inFlight.map(item=>el("span",{},`${item.title} · rendering`))) : "",
-    el("div",{class:"clip-grid"},ready.length?ready.map(clipCard):[el("p",{class:"muted"},"No completed clips yet. Render a suggestion or wait for automatic drafts.")]),
-    failed.length ? el("details",{class:"failed-renders"},[el("summary",{},`${failed.length} earlier failed render versions`),...failed.map(item=>el("p",{},`v${item.version} · ${item.title} · ${item.error||"failed"}`))]) : "",
+    el("div", {class:"section-title"}, [el("div",{},[el("p",{class:"role-kicker"},publisherMode?"PUBLISHER & GROWTH · AGENT 03":"VIDEO EDITOR · AGENT 02"),el("h3",{},publisherMode?"Publishing desk":"Rendered drafts"),el("p",{class:"muted"},publisherMode?"Package approved drafts, dispatch Hermes, and verify real platform receipts.":"Preview, verify, and hand finished drafts to the publishing desk.")]),el("span",{},`${ready.length} ready`)]),
+    !publisherMode&&inFlight.length ? el("div",{class:"render-strip"},inFlight.map(item=>el("span",{},`${item.title} · rendering`))) : "",
+    el("div",{class:"clip-grid"},ordered.length?ordered.map(item=>clipCard(item,mode)):[el("p",{class:"muted"},"No completed clips yet. Render a suggestion or wait for automatic drafts.")]),
+    !publisherMode&&failed.length ? el("details",{class:"failed-renders"},[el("summary",{},`${failed.length} earlier failed render versions`),...failed.map(item=>el("p",{},`v${item.version} · ${item.title} · ${item.error||"failed"}`))]) : "",
   ]);
 }
 
-function clipCard(item) {
+function clipCard(item, mode = "editor") {
   const task = state.publisherTasks[item.id];
   const receipt = item.publisher_result;
   const taskStatus = task?.status || (item.publisher_status === "queued" ? "queued" : item.publisher_status);
@@ -207,7 +247,8 @@ function clipCard(item) {
   const publisherLabel = published ? "Published to TikTok + YouTube" : active ? `Hermes ${taskStatus}…` : taskStatus === "unavailable" ? "Hermes status unavailable" : finished ? `Hermes ${receipt?.status || taskStatus}` : item.publisher_status === "prepared" ? "Retry Hermes publisher" : "Publish with Hermes";
   const statusText = receipt?.summary || (taskStatus && taskStatus !== "prepared" ? `Hermes task ${item.publisher_task_id || ""} · ${taskStatus}` : "Hermes will use the signed-in TikTok and YouTube accounts.");
   const locked = tracked || active || finished || published;
-  return el("article",{class:`clip-card ${state.preview?.id===item.id?"selected":""}`},[el("div",{class:"clip-card-top"},[el("span",{class:"version"},`v${item.version}`),el("span",{class:`ready-dot ${published?"published":""}`},published?"published":active?"Hermes working":"ready")]),el("h4",{},item.title),el("p",{class:"clip-meta"},`${formatDuration(item.duration)} · ${formatBytes(item.size_bytes)} · ${item.start_seconds.toFixed(1)}–${item.end_seconds.toFixed(1)}s`),el("p",{class:"publisher-status"},statusText),el("div",{class:"actions clip-actions"},[el("button",{onclick:()=>previewClip(item).catch(error=>showError(error.message))},"Preview"),el("button",{class:"secondary",onclick:()=>saveClip(item).catch(error=>showError(error.message))},"Save MP4"),el("button",{class:"publisher",onclick:()=>sendToHermesPublisher(item).catch(error=>{showNotice("");showError(error.message);}),...(locked?{disabled:"true"}:{})},publisherLabel)])]);
+  const roleAction = mode === "publisher" ? el("button",{class:"publisher",onclick:()=>sendToHermesPublisher(item).catch(error=>{showNotice("");showError(error.message);}),...(locked?{disabled:"true"}:{})},publisherLabel) : el("button",{class:"publisher",onclick:()=>{state.activeTab="publisher";state.activityCandidate=item.candidate_id;render(state.lastStatus);}},"Open in Publisher");
+  return el("article",{class:`clip-card ${state.preview?.id===item.id?"selected":""}`},[el("div",{class:"clip-card-top"},[el("span",{class:"version"},`v${item.version}`),el("span",{class:`ready-dot ${published?"published":""}`},published?"published":active?"Hermes working":"ready")]),el("h4",{},item.title),el("p",{class:"clip-meta"},`${formatDuration(item.duration)} · ${formatBytes(item.size_bytes)} · ${item.start_seconds.toFixed(1)}–${item.end_seconds.toFixed(1)}s`),el("p",{class:"publisher-status"},statusText),el("div",{class:"actions clip-actions"},[el("button",{onclick:()=>previewClip(item).catch(error=>showError(error.message))},"Preview"),el("button",{class:"secondary",onclick:()=>saveClip(item).catch(error=>showError(error.message))},"Save MP4"),roleAction,el("button",{class:"ghost",onclick:()=>{state.activityCandidate=item.candidate_id;render(state.lastStatus);}},"Activity")])]);
 }
 
 function transcriptPanel(words) {

@@ -48,6 +48,12 @@ def test_job_detail_includes_generated_render_versions(monkeypatch, service):
     assert detail["renders"][0]["title"] == "Generated clip"
     assert detail["renders"][0]["candidate_state"] == "suggested"
     assert detail["renders"][0]["publisher_status"] is None
+    roles = {entry["role"] for entry in detail["activity"]}
+    assert roles == {"story_analyst", "video_editor"}
+    assert {entry["action"] for entry in detail["activity"]} >= {
+        "clip_suggested",
+        "render_ready",
+    }
 
 
 def test_publisher_handoff_preserves_render_and_tracks_queue(monkeypatch, service):
@@ -93,6 +99,10 @@ def test_publisher_handoff_preserves_render_and_tracks_queue(monkeypatch, servic
     detail = client.get(f"/jobs/{job['id']}").json()
     assert detail["renders"][0]["publisher_status"] == "queued"
     assert detail["renders"][0]["publisher_task_id"] == "hermes-task-123"
+    publisher_actions = {
+        entry["action"] for entry in detail["activity"] if entry["role"] == "publisher_growth"
+    }
+    assert publisher_actions >= {"handoff_prepared", "publisher_task_queued"}
 
     outbox.parent.joinpath("publisher-result.json").write_text(
         '{"status":"published","summary":"Unverified","platforms":[]}'

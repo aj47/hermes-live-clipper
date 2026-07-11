@@ -75,6 +75,15 @@ class LiveClipperService:
             "UPDATE candidates SET start_seconds=?,end_seconds=?,start_word_id=?,end_word_id=?,state=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
             (start, end, start_word_id, end_word_id, CandidateState.SUGGESTED, candidate_id),
         )
+        self.db.clip_activity(
+            candidate["job_id"],
+            candidate_id,
+            "review_desk",
+            "boundaries_adjusted",
+            "completed",
+            "Adjusted the clip to transcript word boundaries.",
+            {"start_seconds": start, "end_seconds": end},
+        )
         return self.db.candidate(candidate_id)
 
     def candidate_action(self, candidate_id: str, action: str) -> dict[str, Any]:
@@ -86,7 +95,23 @@ class LiveClipperService:
         }
         if action not in states:
             raise ValueError("unknown candidate action")
+        candidate = self.db.candidate(candidate_id)
         self.db.set_candidate_state(candidate_id, states[action])
+        activity = {
+            "accept": ("clip_accepted", "Accepted the suggestion for editorial use."),
+            "reject": ("clip_rejected", "Rejected the suggestion from the working set."),
+            "render": ("render_requested", "Requested a new draft from the Video Editor."),
+            "delete": ("clip_deleted", "Deleted the suggestion."),
+        }
+        event_action, message = activity[action]
+        self.db.clip_activity(
+            candidate["job_id"],
+            candidate_id,
+            "review_desk",
+            event_action,
+            "queued" if action == "render" else "completed",
+            message,
+        )
         return self.db.candidate(candidate_id)
 
     def status(self) -> dict[str, Any]:
@@ -111,7 +136,144 @@ class LiveClipperService:
             "words": self.db.words(job_id),
             "candidates": self.db.candidates(job_id),
             "renders": self.renders(job_id),
+            "activity": self.clip_activity(job_id),
         }
+
+    def clip_activity(self, job_id: str) -> list[dict[str, Any]]:
+        candidates = {item["id"]: item for item in self.db.candidates(job_id)}
+        activity: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str | None]] = set()
+        rows = self.db.execute(
+            "SELECT id,payload,created_at FROM events WHERE job_id=? AND kind='clip.activity' "
+            "ORDER BY id",
+            (job_id,),
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            candidate_id = payload.get("candidate_id")
+            if candidate_id not in candidates:
+                continue
+            entry = {
+                "id": f"event-{row['id']}",
+                "candidate_id": candidate_id,
+                "render_id": payload.get("render_id"),
+                "role": payload.get("role", "system"),
+                "action": payload.get("action", "updated"),
+                "status": payload.get("status", "completed"),
+                "message": payload.get("message", "Clip activity recorded."),
+                "details": payload.get("details") or {},
+                "created_at": row["created_at"],
+            }
+            activity.append(entry)
+            seen.add((candidate_id, entry["action"], entry["render_id"]))
+
+        for candidate in candidates.values():
+            key = (candidate["id"], "clip_suggested", None)
+            if key not in seen:
+                activity.append(
+                    {
+                        "id": f"candidate-{candidate['id']}",
+                        "candidate_id": candidate["id"],
+                        "render_id": None,
+                        "role": "story_analyst",
+                        "action": "clip_suggested",
+                        "status": "completed",
+                        "message": "Identified and scored this moment as a standalone clip opportunity.",
+                        "details": {"confidence": candidate["confidence"]},
+                        "created_at": candidate["created_at"],
+                    }
+                )
+
+        render_rows = self.db.execute(
+            "SELECT r.*,c.job_id FROM renders r JOIN candidates c ON c.id=r.candidate_id "
+            "WHERE c.job_id=? ORDER BY r.created_at,r.version",
+            (job_id,),
+        ).fetchall()
+        for row in render_rows:
+            action = (
+                "render_ready"
+                if row["state"] == "ready"
+                else "render_failed"
+                if row["state"] == "failed"
+                else "render_started"
+            )
+            key = (row["candidate_id"], action, row["id"])
+            if key in seen:
+                continue
+            message = (
+                f"Completed render version {row['version']} and verified its audio and video."
+                if row["state"] == "ready"
+                else f"Render version {row['version']} failed: {row['error'] or 'unknown error'}."
+                if row["state"] == "failed"
+                else f"Started render version {row['version']}."
+            )
+            activity.append(
+                {
+                    "id": f"render-{row['id']}-{row['state']}",
+                    "candidate_id": row["candidate_id"],
+                    "render_id": row["id"],
+                    "role": "video_editor",
+                    "action": action,
+                    "status": row["state"],
+                    "message": message,
+                    "details": {"version": row["version"], "duration": row["duration"]},
+                    "created_at": row["created_at"],
+                }
+            )
+
+        handoffs = self.db.execute(
+            "SELECT h.*,r.candidate_id FROM publisher_handoffs h "
+            "JOIN renders r ON r.id=h.render_id JOIN candidates c ON c.id=r.candidate_id "
+            "WHERE c.job_id=?",
+            (job_id,),
+        ).fetchall()
+        for row in handoffs:
+            action = "publisher_task_queued" if row["status"] == "queued" else "handoff_prepared"
+            key = (row["candidate_id"], action, row["render_id"])
+            if key in seen:
+                continue
+            activity.append(
+                {
+                    "id": f"handoff-{row['render_id']}-{row['status']}",
+                    "candidate_id": row["candidate_id"],
+                    "render_id": row["render_id"],
+                    "role": "publisher_growth",
+                    "action": action,
+                    "status": row["status"],
+                    "message": "Queued a Hermes publishing task."
+                    if row["status"] == "queued"
+                    else "Preserved the MP4 for publishing.",
+                    "details": {"task_id": row["task_id"]} if row["task_id"] else {},
+                    "created_at": row["updated_at"],
+                }
+            )
+            result_path = (
+                self.settings.root / "publisher_outbox" / row["render_id"] / "publisher-result.json"
+            )
+            result = self._read_publisher_result(result_path)
+            if result:
+                completed_at = result.get("completed_at")
+                if not isinstance(completed_at, str):
+                    completed_at = datetime.fromtimestamp(
+                        result_path.stat().st_mtime, UTC
+                    ).isoformat()
+                activity.append(
+                    {
+                        "id": f"publisher-result-{row['render_id']}",
+                        "candidate_id": row["candidate_id"],
+                        "render_id": row["render_id"],
+                        "role": "publisher_growth",
+                        "action": "publishing_finished",
+                        "status": result["status"],
+                        "message": result.get("summary") or "Publishing task finished.",
+                        "details": {"platforms": result.get("platforms") or []},
+                        "created_at": completed_at,
+                    }
+                )
+        return sorted(activity, key=lambda item: (item["created_at"], item["id"]), reverse=True)
 
     def renders(self, job_id: str) -> list[dict[str, Any]]:
         rows = self.db.execute(
@@ -182,6 +344,9 @@ class LiveClipperService:
         if root not in source.parents or not source.is_file():
             raise FileNotFoundError("Render file is missing")
 
+        existing_handoff = self.db.execute(
+            "SELECT status,task_id FROM publisher_handoffs WHERE render_id=?", (render_id,)
+        ).fetchone()
         with self._lock:
             outbox = self.settings.root / "publisher_outbox" / render_id
             outbox.mkdir(parents=True, exist_ok=True)
@@ -213,6 +378,17 @@ class LiveClipperService:
                 "updated_at=CURRENT_TIMESTAMP",
                 (render_id, str(clip_path)),
             )
+            if not existing_handoff:
+                self.db.clip_activity(
+                    item["job_id"],
+                    item["candidate_id"],
+                    "publisher_growth",
+                    "handoff_prepared",
+                    "completed",
+                    "Preserved the verified MP4 and prepared its publishing brief.",
+                    {"version": item["version"]},
+                    render_id,
+                )
 
         task_body = f"""Publish this specific Live Clipper render to the signed-in local TikTok and YouTube accounts.
 
@@ -260,7 +436,10 @@ Final response must repeat the truthful status, receipts, and any action the use
         self, render_id: str, task_id: str | None = None
     ) -> dict[str, Any]:
         row = self.db.execute(
-            "SELECT render_id FROM publisher_handoffs WHERE render_id=?", (render_id,)
+            "SELECT h.render_id,h.status,h.task_id,r.candidate_id,c.job_id "
+            "FROM publisher_handoffs h JOIN renders r ON r.id=h.render_id "
+            "JOIN candidates c ON c.id=r.candidate_id WHERE h.render_id=?",
+            (render_id,),
         ).fetchone()
         if not row:
             raise KeyError(render_id)
@@ -269,6 +448,17 @@ Final response must repeat the truthful status, receipts, and any action the use
             "updated_at=CURRENT_TIMESTAMP WHERE render_id=?",
             (task_id, render_id),
         )
+        if row["status"] != "queued" or row["task_id"] != task_id:
+            self.db.clip_activity(
+                row["job_id"],
+                row["candidate_id"],
+                "publisher_growth",
+                "publisher_task_queued",
+                "queued",
+                "Started a durable Hermes Publisher & Growth task.",
+                {"task_id": task_id} if task_id else {},
+                render_id,
+            )
         return {"render_id": render_id, "status": "queued", "task_id": task_id}
 
     def reconcile_for_worker_start(self) -> None:

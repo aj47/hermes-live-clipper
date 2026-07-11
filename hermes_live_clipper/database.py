@@ -137,12 +137,18 @@ class Database:
     def upsert_candidate(self, job_id: str, candidate: dict[str, Any]) -> str:
         start, end = float(candidate["start_seconds"]), float(candidate["end_seconds"])
         overlap = self.execute(
-            "SELECT id,start_seconds,end_seconds,confidence FROM candidates WHERE job_id=? AND state != ? AND MIN(end_seconds,?) - MAX(start_seconds,?) > 0.5 * MIN(end_seconds-start_seconds,?-?) ORDER BY confidence DESC LIMIT 1",
+            "SELECT id,start_seconds,end_seconds,title,confidence FROM candidates WHERE job_id=? AND state != ? AND MIN(end_seconds,?) - MAX(start_seconds,?) > 0.5 * MIN(end_seconds-start_seconds,?-?) ORDER BY confidence DESC LIMIT 1",
             (job_id, CandidateState.DELETED, end, start, end, start),
         ).fetchone()
         if overlap:
             candidate_id = overlap["id"]
             if float(candidate["confidence"]) >= float(overlap["confidence"]):
+                changed = (
+                    abs(start - float(overlap["start_seconds"])) > 0.05
+                    or abs(end - float(overlap["end_seconds"])) > 0.05
+                    or candidate["title"] != overlap["title"]
+                    or float(candidate["confidence"]) > float(overlap["confidence"]) + 0.001
+                )
                 self.execute(
                     "UPDATE candidates SET start_seconds=?,end_seconds=?,title=?,hook=?,payoff=?,rationale=?,confidence=?,standalone_value=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                     (
@@ -157,6 +163,16 @@ class Database:
                         candidate_id,
                     ),
                 )
+                if changed:
+                    self.clip_activity(
+                        job_id,
+                        candidate_id,
+                        "story_analyst",
+                        "suggestion_refined",
+                        "completed",
+                        "Refined the clip boundaries and score after reviewing additional context.",
+                        {"confidence": float(candidate["confidence"])},
+                    )
             return candidate_id
         candidate_id = uuid.uuid4().hex
         self.execute(
@@ -176,6 +192,15 @@ class Database:
             ),
         )
         self.event(job_id, "candidate.created", {"candidate_id": candidate_id})
+        self.clip_activity(
+            job_id,
+            candidate_id,
+            "story_analyst",
+            "clip_suggested",
+            "completed",
+            "Identified and scored this moment as a standalone clip opportunity.",
+            {"confidence": float(candidate["confidence"])},
+        )
         return candidate_id
 
     def candidates(self, job_id: str) -> list[dict[str, Any]]:
@@ -201,4 +226,29 @@ class Database:
         self.execute(
             "INSERT INTO events(job_id,kind,payload) VALUES(?,?,?)",
             (job_id, kind, json.dumps(payload, separators=(",", ":"))),
+        )
+
+    def clip_activity(
+        self,
+        job_id: str,
+        candidate_id: str,
+        role: str,
+        action: str,
+        status: str,
+        message: str,
+        details: dict[str, Any] | None = None,
+        render_id: str | None = None,
+    ) -> None:
+        self.event(
+            job_id,
+            "clip.activity",
+            {
+                "candidate_id": candidate_id,
+                "render_id": render_id,
+                "role": role,
+                "action": action,
+                "status": status,
+                "message": message,
+                "details": details or {},
+            },
         )
