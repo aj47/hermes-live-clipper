@@ -23,15 +23,13 @@ ACTIVE_JOB_STATES = {
     JobState.FINALIZING,
 }
 ACTIVE_CANDIDATE_STATES = {CandidateState.RENDER_QUEUED, CandidateState.RENDERING}
-DELETE_TARGETS = frozenset(
-    {
-        ("publisher_handoffs", "render_id"),
-        ("events", "id"),
-        ("renders", "id"),
-        ("candidates", "id"),
-        ("jobs", "id"),
-    }
-)
+DELETE_STATEMENTS = {
+    ("publisher_handoffs", "render_id"): "DELETE FROM publisher_handoffs WHERE render_id IN ({ids})",
+    ("events", "id"): "DELETE FROM events WHERE id IN ({ids})",
+    ("renders", "id"): "DELETE FROM renders WHERE id IN ({ids})",
+    ("candidates", "id"): "DELETE FROM candidates WHERE id IN ({ids})",
+    ("jobs", "id"): "DELETE FROM jobs WHERE id IN ({ids})",
+}
 
 
 def _rows_by_ids(db: Database, sql: str, ids: set[str]) -> list[dict[str, Any]]:
@@ -281,10 +279,8 @@ class CleanupManager:
     def _delete_ids(connection, table: str, column: str, ids: set[Any]) -> None:
         if not ids:
             return
-        if (table, column) not in DELETE_TARGETS:
+        statement = DELETE_STATEMENTS.get((table, column))
+        if statement is None:
             raise CleanupError("Unsupported cleanup target")
         placeholders = ",".join("?" for _ in ids)
-        # Identifiers are restricted by DELETE_TARGETS; values remain parameterized.
-        connection.execute(  # nosec B608
-            f"DELETE FROM {table} WHERE {column} IN ({placeholders})", tuple(ids)
-        )
+        connection.execute(statement.format(ids=placeholders), tuple(ids))
